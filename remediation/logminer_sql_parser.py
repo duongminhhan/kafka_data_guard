@@ -80,10 +80,56 @@ def _scan_parts(text: str, *, delimiter: str) -> list[str]:
 
 
 def _find_keyword(text: str, keyword: str) -> int:
-    parts = _scan_parts(text, delimiter=keyword)
-    if len(parts) != 2:
-        raise LogMinerSqlParseError(f"Expected one {keyword} clause in LogMiner SQL")
-    return len(parts[0])
+    depth = 0
+    single_quoted = False
+    double_quoted = False
+    upper = text.upper()
+    target = keyword.upper()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if single_quoted:
+            if char == "'" and index + 1 < len(text) and text[index + 1] == "'":
+                index += 2
+                continue
+            if char == "'":
+                single_quoted = False
+            index += 1
+            continue
+        if double_quoted:
+            if char == '"' and index + 1 < len(text) and text[index + 1] == '"':
+                index += 2
+                continue
+            if char == '"':
+                double_quoted = False
+            index += 1
+            continue
+        if char == "'":
+            single_quoted = True
+            index += 1
+            continue
+        if char == '"':
+            double_quoted = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            index += 1
+            continue
+        end = index + len(target)
+        if (
+            depth == 0
+            and upper.startswith(target, index)
+            and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_"))
+            and (end == len(text) or not (text[end].isalnum() or text[end] == "_"))
+        ):
+            return index
+        index += 1
+    raise LogMinerSqlParseError(f"Missing {keyword} clause in LogMiner SQL")
 
 
 def _canonical_column(identifier: str, metadata: TableMetadata) -> str | None:

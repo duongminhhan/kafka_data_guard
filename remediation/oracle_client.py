@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from collections import defaultdict
 from decimal import Decimal
 from threading import Lock
 from time import monotonic
