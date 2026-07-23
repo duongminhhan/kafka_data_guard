@@ -65,6 +65,7 @@ class MinedChange:
     redo_sql: str | None
     before_delta: dict[str, Any]
     after_delta: dict[str, Any]
+    undo_sql: str | None = None
 
 
 @dataclass(frozen=True)

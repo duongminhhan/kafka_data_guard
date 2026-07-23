@@ -15,6 +15,10 @@ from remediation.models import (
     TransactionTable,
     MinedChange,
 )
+from remediation.logminer_sql_parser import (
+    LogMinerSqlParseError,
+    parse_logminer_change,
+)
 from remediation.sql_utils import quote_identifier, quote_qualified_name
 
 
@@ -324,36 +328,6 @@ class OracleClient:
         cursor.execute(sql, **binds)
 
     @staticmethod
-    def _mine_name(container: str, table: TableRef, column: str) -> str:
-        prefix = "" if container.upper() == "CDB$ROOT" else f"{container}:"
-        value = f"{prefix}{table.owner}.{table.name}.{column}"
-        return value.replace("'", "''")
-
-    @staticmethod
-    def _cast_mined_value(expression: str, data_type: str) -> str:
-        data_type = data_type.upper()
-        if data_type in {"CHAR", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR2"}:
-            return expression
-        # Debezium decimal.handling.mode=string maps Oracle NUMBER/FLOAT to JSON strings.
-        if data_type in {"NUMBER", "FLOAT"}:
-            return expression
-        if data_type == "BINARY_FLOAT":
-            return f"CAST({expression} AS BINARY_FLOAT)"
-        if data_type == "BINARY_DOUBLE":
-            return f"CAST({expression} AS BINARY_DOUBLE)"
-        if data_type == "DATE":
-            return f"CAST({expression} AS DATE)"
-        if data_type.startswith("TIMESTAMP WITH TIME ZONE"):
-            return f"CAST({expression} AS TIMESTAMP WITH TIME ZONE)"
-        if data_type.startswith("TIMESTAMP"):
-            return f"CAST({expression} AS TIMESTAMP)"
-        if data_type == "RAW":
-            return f"HEXTORAW({expression})"
-        raise ValueError(
-            f"Oracle type {data_type} is not supported for exact LogMiner replay"
-        )
-
-    @staticmethod
     def _normalize_number(value: Any, scale: int | None) -> str | None:
         if value is None:
             return None
@@ -365,108 +339,111 @@ class OracleClient:
         quantum = Decimal(1).scaleb(-scale)
         return format(decimal_value.quantize(quantum), "f")
 
-    def _mine_column_chunk(
+    def _mine_sql_statements(
         self,
         cursor: oracledb.Cursor,
         xid: str,
         metadata_by_table: dict[TableRef, TableMetadata],
-        columns: list[tuple[TableRef, str]],
-        container: str,
-        include_redo_sql: bool,
-    ) -> dict[tuple[int, str, int], dict[str, Any]]:
-        # Each table is queried separately because MINE_VALUE requires a fully-qualified
-        # column name. Column chunks keep the SELECT list below Oracle's 1000-column cap.
-        result: dict[tuple[int, str, int], dict[str, Any]] = {}
-        by_table: dict[TableRef, list[str]] = defaultdict(list)
-        for table, column in columns:
-            by_table[table].append(column)
-        for table, table_columns in by_table.items():
-            metadata = metadata_by_table[table]
-            expressions: list[str] = []
-            for index, column in enumerate(table_columns):
-                mine_name = self._mine_name(container, table, column)
-                undo = f"DBMS_LOGMNR.MINE_VALUE(UNDO_VALUE, '{mine_name}')"
-                redo = f"DBMS_LOGMNR.MINE_VALUE(REDO_VALUE, '{mine_name}')"
-                expressions.extend(
-                    (
-                        f"DBMS_LOGMNR.COLUMN_PRESENT(UNDO_VALUE, '{mine_name}') AS U_P_{index}",
-                        f"{self._cast_mined_value(undo, metadata.column_types[column])} AS U_V_{index}",
-                        f"DBMS_LOGMNR.COLUMN_PRESENT(REDO_VALUE, '{mine_name}') AS R_P_{index}",
-                        f"{self._cast_mined_value(redo, metadata.column_types[column])} AS R_V_{index}",
-                    )
-                )
-            redo_sql_expression = "SQL_REDO" if include_redo_sql else "NULL"
-            sql = f"""
-                SELECT SCN, RS_ID, SSN, SEQUENCE# AS TX_SEQUENCE,
+    ) -> list[MinedChange]:
+        sql = """
+                SELECT SCN, RS_ID, SSN, CSF, SEQUENCE# AS TX_SEQUENCE,
+                       RAWTOHEX(XID) AS XID_HEX,
+                       SEG_OWNER AS TABLE_OWNER, TABLE_NAME, ROW_ID,
                        CASE
-                           WHEN ROW_ID IS NULL THEN NULL
+                            WHEN ROW_ID IS NULL THEN NULL
                            ELSE DBMS_ROWID.ROWID_CREATE(
                                1,
                                0,
                                DBMS_ROWID.ROWID_RELATIVE_FNO(CHARTOROWID(ROW_ID)),
                                DBMS_ROWID.ROWID_BLOCK_NUMBER(CHARTOROWID(ROW_ID)),
                                DBMS_ROWID.ROWID_ROW_NUMBER(CHARTOROWID(ROW_ID))
-                           )
-                       END AS DEBEZIUM_ROW_ID,
-                       OPERATION, COMMIT_SCN, TIMESTAMP,
+                            )
+                        END AS DEBEZIUM_ROW_ID,
+                       OPERATION, SQL_REDO, SQL_UNDO, COMMIT_SCN, TIMESTAMP,
                        START_TIMESTAMP, COMMIT_TIMESTAMP,
-                       THREAD#, USERNAME, {redo_sql_expression} AS SQL_REDO,
-                       {', '.join(expressions)}
+                       THREAD#, USERNAME
                 FROM V$LOGMNR_CONTENTS
                 WHERE XID = HEXTORAW(:xid)
-                  AND SEG_OWNER = :owner
-                  AND TABLE_NAME = :table_name
                   AND OPERATION IN ('INSERT', 'UPDATE', 'DELETE')
                 ORDER BY SEQUENCE#, SCN, RS_ID, SSN
-            """
-            binds = {
-                "xid": xid,
-                "owner": table.owner,
-                "table_name": table.name,
-            }
-            self._observe_query("logminer_dml", sql, binds)
-            cursor.execute(sql, **binds)
-            for row in cursor:
-                key = (int(row[0]), str(row[1]).strip(), int(row[2]))
-                item = result.setdefault(
-                    key,
-                    {
-                        "table": table,
-                        "sequence": int(row[3]),
-                        "row_id": str(row[4]) if row[4] else None,
-                        "operation": str(row[5]),
-                        "commit_scn": int(row[6]),
-                        "change_time": row[7],
-                        "start_time": row[8],
-                        "commit_time": row[9],
-                        "redo_thread": int(row[10]) if row[10] is not None else None,
-                        "user_name": str(row[11]) if row[11] else None,
-                        "redo_fragments": [],
-                        "before": {},
-                        "after": {},
-                    },
+        """
+        binds = {"xid": xid}
+        self._observe_query("logminer_dml", sql, binds)
+        cursor.execute(sql, **binds)
+        result: list[MinedChange] = []
+        pending: dict[str, Any] | None = None
+
+        def finish(item: dict[str, Any]) -> None:
+            table = TableRef(item["owner"], item["table_name"])
+            metadata = metadata_by_table.get(table)
+            if metadata is None:
+                return
+            redo_sql = "".join(item["redo_fragments"]) or None
+            undo_sql = "".join(item["undo_fragments"]) or None
+            try:
+                before_delta, after_delta = parse_logminer_change(
+                    item["operation"],
+                    redo_sql,
+                    undo_sql,
+                    metadata,
                 )
-                if row[12] is not None:
-                    item["redo_fragments"].append(str(row[12]))
-                offset = 13
-                for index, column in enumerate(table_columns):
-                    undo_present, undo_value, redo_present, redo_value = row[
-                        offset + index * 4 : offset + index * 4 + 4
-                    ]
-                    if int(undo_present or 0) == 1:
-                        if metadata.column_types[column].upper() in {"NUMBER", "FLOAT"}:
-                            undo_value = self._normalize_number(
-                                undo_value, metadata.column_scales[column]
-                            )
-                        item["before"][column] = undo_value
-                    if int(redo_present or 0) == 1:
-                        if metadata.column_types[column].upper() in {"NUMBER", "FLOAT"}:
-                            redo_value = self._normalize_number(
-                                redo_value, metadata.column_scales[column]
-                            )
-                        item["after"][column] = redo_value
-            for item in result.values():
-                item["redo_sql"] = "".join(item["redo_fragments"]) or None
+            except LogMinerSqlParseError as exc:
+                raise LogMinerSqlParseError(
+                    f"{table.qualified_name} SCN={item['scn']} "
+                    f"RS_ID={item['rs_id']} SSN={item['ssn']}: {exc}"
+                ) from exc
+            result.append(
+                MinedChange(
+                    table=table,
+                    operation=item["operation"],
+                    scn=item["scn"],
+                    commit_scn=item["commit_scn"],
+                    rs_id=item["rs_id"],
+                    ssn=item["ssn"],
+                    row_id=item["row_id"],
+                    redo_thread=item["redo_thread"],
+                    user_name=item["user_name"],
+                    change_time=item["change_time"],
+                    start_time=item["start_time"],
+                    commit_time=item["commit_time"],
+                    redo_sql=redo_sql,
+                    undo_sql=undo_sql,
+                    before_delta=before_delta,
+                    after_delta=after_delta,
+                )
+            )
+
+        for row in cursor:
+            if pending is None:
+                pending = {
+                    "scn": int(row[0]),
+                    "rs_id": str(row[1]).strip(),
+                    "ssn": int(row[2]),
+                    "sequence": int(row[4]),
+                    "owner": str(row[6]),
+                    "table_name": str(row[7]),
+                    "row_id": str(row[9]) if row[9] else None,
+                    "operation": str(row[10]),
+                    "commit_scn": int(row[13]),
+                    "change_time": row[14],
+                    "start_time": row[15],
+                    "commit_time": row[16],
+                    "redo_thread": int(row[17]) if row[17] is not None else None,
+                    "user_name": str(row[18]) if row[18] else None,
+                    "redo_fragments": [],
+                    "undo_fragments": [],
+                }
+            if row[11] is not None:
+                pending["redo_fragments"].append(str(row[11]))
+            if row[12] is not None:
+                pending["undo_fragments"].append(str(row[12]))
+            if int(row[3] or 0) == 0:
+                finish(pending)
+                pending = None
+        if pending is not None:
+            raise LogMinerSqlParseError(
+                "Last V$LOGMNR_CONTENTS row has CSF=1; SQL statement is incomplete"
+            )
         return result
 
     def mine_transaction(
@@ -484,56 +461,16 @@ class OracleClient:
                 raise RuntimeError(
                     "LogMiner connection must target CDB$ROOT when database.pdb.name is configured"
                 )
-            source_container = pdb_name or container
             try:
                 logfiles = self._discover_logfiles(cursor, start_scn, end_scn)
                 self._add_logfiles(cursor, logfiles)
                 self._start_logminer(cursor, start_scn, end_scn)
 
-                merged: dict[tuple[int, str, int], dict[str, Any]] = {}
-                # 50 columns => 200 mined value/presence expressions per SELECT.
-                for table, metadata in metadata_by_table.items():
-                    for index in range(0, len(metadata.columns), 50):
-                        columns = [
-                            (table, column)
-                            for column in metadata.columns[index : index + 50]
-                        ]
-                        chunk = self._mine_column_chunk(
-                            cursor,
-                            xid,
-                            metadata_by_table,
-                            columns,
-                            source_container,
-                            include_redo_sql,
-                        )
-                        for key, item in chunk.items():
-                            target = merged.setdefault(key, item)
-                            if target is not item:
-                                target["before"].update(item["before"])
-                                target["after"].update(item["after"])
-                return [
-                    MinedChange(
-                        table=item["table"],
-                        operation=item["operation"],
-                        scn=key[0],
-                        commit_scn=item["commit_scn"],
-                        rs_id=key[1],
-                        ssn=key[2],
-                        row_id=item["row_id"],
-                        redo_thread=item["redo_thread"],
-                        user_name=item["user_name"],
-                        change_time=item["change_time"],
-                        start_time=item["start_time"],
-                        commit_time=item["commit_time"],
-                        redo_sql=item["redo_sql"],
-                        before_delta=item["before"],
-                        after_delta=item["after"],
-                    )
-                    for key, item in sorted(
-                        merged.items(),
-                        key=lambda pair: (pair[1]["sequence"], pair[0]),
-                    )
-                ]
+                return self._mine_sql_statements(
+                    cursor,
+                    xid,
+                    metadata_by_table,
+                )
             finally:
                 self._end_logminer(cursor, ignore_not_started=True)
 
