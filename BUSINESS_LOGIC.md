@@ -164,8 +164,10 @@ Redo vẫn được đọc và đối chiếu đủ số DML để không xử l
 đó service gom theo `(table, primary key)`, batch các key cùng bảng vào một lần SELECT
 source và chỉ đánh giá trạng thái mỗi key một lần:
 
-- Source có row và lịch sử XID có `INSERT/UPDATE`: phát một `c`, `before=null`, `after`
-  là toàn bộ row hiện tại.
+- Source có row và lịch sử XID có `INSERT`: phát một `c`, `before=null`, `after` là
+  toàn bộ row hiện tại.
+- Source có row và lịch sử XID chỉ có `UPDATE`: phát một `u`, `before` lấy từ UPDATE
+  cuối đã reconstruct, `after` là toàn bộ row hiện tại.
 - Source không có row và lịch sử XID có `DELETE`: phát một `d`, `before` lấy từ trạng
   thái trước delete, `after=null`.
 - Source có row và lịch sử XID chỉ có `DELETE`: bypass; key đã được nghiệp vụ tạo lại,

@@ -61,7 +61,8 @@ vấn Oracle.
 
 | Oracle operation | Debezium `op` | `before` | `after` |
 |---|---|---|---|
-| Có row hiện tại và XID có `INSERT/UPDATE` | `c` | `null` | Toàn bộ row hiện tại |
+| Có row hiện tại và XID có `INSERT` | `c` | `null` | Toàn bộ row hiện tại |
+| Có row hiện tại và XID chỉ có `UPDATE` | `u` | Row trước UPDATE cuối | Toàn bộ row hiện tại |
 | Không có row hiện tại và XID có `DELETE` | `d` | Row trước delete | `null` |
 | Có row hiện tại và XID chỉ có `DELETE` | Bypass | — | Tránh xóa row đã được tạo lại |
 | Không có row hiện tại và XID chỉ có `INSERT/UPDATE` | Bypass | — | Không có source row để dựng |

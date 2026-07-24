@@ -5,6 +5,7 @@ from typing import Any, Iterator, Mapping
 
 from remediation.domain.models import TableMetadata, TableRef
 from remediation.oracle.client import OracleClient
+from scripts.test_transaction import StepPrinter
 
 
 class _Cursor:
@@ -108,3 +109,19 @@ def test_source_as_of_query_trace_contains_start_scn() -> None:
     assert stage == "source_as_of"
     assert 'FROM "C##CDCUSER"."ITEM_COMMENTS" AS OF SCN :as_of_scn' in sql
     assert binds["as_of_scn"] == 6565787
+
+
+def test_step_printer_only_shows_selected_step(capsys) -> None:
+    printer = StepPrinter("3")
+
+    printer.query("logminer_dml", "SELECT * FROM V$LOGMNR_CONTENTS", {})
+    printer.query(
+        "source_as_of",
+        'SELECT "ID" FROM "OWNER"."TABLE" AS OF SCN :as_of_scn',
+        {"as_of_scn": 100},
+    )
+
+    output = capsys.readouterr().out
+    assert "V$LOGMNR_CONTENTS" not in output
+    assert "BƯỚC 3" in output
+    assert '"as_of_scn": 100' in output

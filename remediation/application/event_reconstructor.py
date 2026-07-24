@@ -51,25 +51,23 @@ def reconstruct_events(
                 )
             after = {column: None for column in metadata.columns}
 
-            # được parse từ SQL_REDO của INSERT.
-
-
-            after.update(change.after_delta)
+            after.update(change.after_delta) # được parse từ SQL_REDO của INSERT.
 
             event_key = _key(after, metadata.key_columns)
-            before = None
+            before = None # mặc định INSERT before là null
             state[identity] = after.copy()
 
         elif operation == "UPDATE":
             if current is None:
                 old_key = _key(change.before_delta, metadata.key_columns)
-                current = seed_loader(metadata, old_key)
+                current = seed_loader(metadata, old_key) # lấy row đã được SELECT trước đó bằng AS OF START_SCN
             if current is None:
                 raise IncompleteRedoError(
                     f"Cannot reconstruct pre-transaction row for UPDATE {change.row_id}"
                 )
+
             before = current.copy()
-            before.update(change.before_delta)
+            before.update(change.before_delta) # parse từ SQL_UNDO
             after = before.copy()
             after.update(change.after_delta)
             before_key = _key(before, metadata.key_columns)
@@ -103,7 +101,7 @@ def reconstruct_events(
                     f"Cannot reconstruct deleted row {change.row_id}"
                 )
             event_key = _key(before, metadata.key_columns)
-            after = None
+            after = None # mặc định DELETE after là null
             state.pop(identity, None)
 
         events.append(

@@ -17,6 +17,8 @@ _RUNTIME_CONFIG_CACHE_TTL_SECONDS = 60.0
 
 @dataclass(frozen=True)
 class ConnectorRuntimeConfig:
+    """Snapshot contract của connector dùng để lọc table và dựng message tương thích."""
+
     topic_prefix: str
     include_patterns: tuple[re.Pattern[str], ...]
     exclude_patterns: tuple[re.Pattern[str], ...]

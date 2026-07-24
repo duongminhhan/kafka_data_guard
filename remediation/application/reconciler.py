@@ -216,13 +216,13 @@ class Reconciler:
         if self._trace_observer is not None:
             self._trace_observer(stage, value)
 
-    # BẮT ĐẦU ĐỌC BUSINESS LOGIC TỪ HÀM NÀY.
+    # BẮT ĐẦU ĐỌC LOGIC TỪ HÀM NÀY.
     def build_repairs(
         self,
         event: AlertEvent,
         connector_config: ConnectorRuntimeConfig,
     ) -> tuple[list[RepairRecord], dict[str, int]]:
-        """Luồng chính: đọc từ BƯỚC 1 đến BƯỚC 7."""
+        """Luồng chính"""
 
         # BƯỚC 1: Tìm table, SCN và metadata của transaction.
         included, by_table = self._find_transaction_scope(event, connector_config)
@@ -367,13 +367,20 @@ class Reconciler:
         pdb_name: str | None,
     ) -> RowsByTable:
         """Bước 3: lấy full row trước transaction cho UPDATE/DELETE."""
+        # 1. Gom các primary key cần tra seed theo từng table.
         seed_keys_by_table: dict[
             TableRef, dict[RowIdentity, Row]
         ] = defaultdict(dict)
+
+        # 2. Chỉ UPDATE/DELETE cần trạng thái đầy đủ trước transaction.
+        #    INSERT đã có dữ liệu mới trong SQL_REDO nên không cần seed row.
         for change in mined:
             if change.operation.upper() not in {"UPDATE", "DELETE"}:
                 continue
             metadata = metadata_by_table[change.table]
+
+            # 3. Muốn SELECT lại source phải lấy đủ các cột primary key
+            #    đã được parser tách từ SQL_REDO/SQL_UNDO vào before_delta.
             if not all(
                 column in change.before_delta for column in metadata.key_columns
             ):
@@ -382,9 +389,14 @@ class Reconciler:
                 column: change.before_delta[column]
                 for column in metadata.key_columns
             }
+
+            # 4. Chuẩn hóa composite PK thành tuple để loại key trùng khi một
+            #    record bị UPDATE/DELETE nhiều lần trong cùng transaction.
             identity = self._row_identity(key, metadata.key_columns)
             seed_keys_by_table[change.table].setdefault(identity, key)
 
+        # 5. Với mỗi table, SELECT batch AS OF START_SCN để lấy full row
+        #    trước transaction; tránh thực hiện một query cho từng event.
         seed_rows: RowsByTable = {}
         for table, keys_by_identity in seed_keys_by_table.items():
             metadata = metadata_by_table[table]
@@ -394,6 +406,8 @@ class Reconciler:
                 start_scn,
                 pdb_name,
             )
+
+        # 6. Trả seed theo table + composite PK để reconstruct_events tra cứu.
         return seed_rows
 
     @staticmethod
@@ -402,14 +416,26 @@ class Reconciler:
         metadata_by_table: dict[TableRef, TableMetadata],
     ) -> GroupedEvents:
         """Bước 5: mỗi table + PK chỉ tạo tối đa một repair message."""
+        # 1. Kết quả có dạng:
+        #    (table, composite_primary_key) -> các event của cùng một record.
         grouped: GroupedEvents = {}
+
+        # 2. Duyệt toàn bộ I/U/D đã được reconstruct theo đúng thứ tự transaction.
         for replay in replay_events:
             metadata = metadata_by_table[replay.table]
+
+            # 3. Chuyển Kafka key dạng dict thành tuple theo đúng thứ tự các cột
+            #    primary key; kết hợp thêm table để tránh trùng key giữa các bảng.
             identity = (
                 replay.table,
                 Reconciler._row_identity(replay.key, metadata.key_columns),
             )
+
+            # 4. Giữ tất cả event cùng identity trong một list để bước sau nhìn
+            #    được toàn bộ lịch sử và quyết định emit c, emit d hoặc bypass.
             grouped.setdefault(identity, []).append(replay)
+
+        # 5. Mỗi group đại diện cho một record và chỉ sinh tối đa một repair.
         return grouped
 
     def _load_current_rows(
@@ -441,11 +467,21 @@ class Reconciler:
         metadata_by_table: dict[TableRef, TableMetadata],
     ) -> tuple[list[RepairDecision], list[dict[str, Any]]]:
         """Bước 6: áp dụng bốn nhánh c/d/bypass."""
+        # 1. decisions chứa event thật sự sẽ emit; decision_trace chỉ dùng
+        #    để giải thích vì sao mỗi key được emit hoặc bypass.
         decisions: list[RepairDecision] = []
         decision_trace: list[dict[str, Any]] = []
+
+        # 2. Mỗi group là toàn bộ lịch sử I/U/D của đúng một table + PK.
         for (table, identity), replays in grouped.items():
             metadata = metadata_by_table[replays[0].table]
+
+            # 3. Lấy trạng thái mới nhất của key đã SELECT trực tiếp từ source.
+            #    current=None nghĩa là key hiện không còn tồn tại.
             current = current_rows.get(table, {}).get(identity)
+
+            # 4. Tách history thành nhóm tạo/cập nhật và nhóm xóa để xét
+            #    trạng thái cuối cùng mà remediation được phép phát.
             upserts = [
                 replay
                 for replay in replays
@@ -454,7 +490,8 @@ class Reconciler:
             deletes = [replay for replay in replays if replay.operation == "DELETE"]
 
             if current is not None:
-                # Chỉ có DELETE nhưng source còn row: key đã được tạo lại, phải bypass.
+                # 5a. History chỉ có DELETE nhưng source vẫn còn row:
+                #     key đã được nghiệp vụ tạo lại ngoài history, phải bypass.
                 if not upserts:
                     decision_trace.append(
                         {
@@ -467,7 +504,17 @@ class Reconciler:
                         }
                     )
                     continue
+
+                # 5b. Source còn row và history có INSERT/UPDATE:
+                #     - Có INSERT trong history: phát c vì downstream có thể
+                #       chưa từng nhận key này.
+                #     - Chỉ có UPDATE: giữ op=u và before của UPDATE cuối.
+                #     Cả hai trường hợp đều lấy after từ full row hiện tại.
                 representative = upserts[-1]
+                has_insert = any(
+                    replay.operation == "INSERT" for replay in replays
+                )
+                output_op = "c" if has_insert else "u"
                 current_key = {
                     column: current[column] for column in metadata.key_columns
                 }
@@ -475,12 +522,12 @@ class Reconciler:
                     (
                         replace(
                             representative,
-                            operation="INSERT",
+                            operation="INSERT" if has_insert else "UPDATE",
                             key=current_key,
-                            before=None,
+                            before=None if has_insert else representative.before,
                             after=current,
                         ),
-                        "c",
+                        output_op,
                     )
                 )
                 decision_trace.append(
@@ -490,12 +537,17 @@ class Reconciler:
                         "source_row": current,
                         "operations": [item.operation for item in replays],
                         "decision": "EMIT",
-                        "output_op": "c",
-                        "reason": "current source row exists",
+                        "output_op": output_op,
+                        "reason": (
+                            "current source row exists and history contains INSERT"
+                            if has_insert
+                            else "current source row exists and history contains only UPDATE"
+                        ),
                     }
                 )
             else:
-                # Không còn row: chỉ DELETE mới đủ điều kiện phát op=d.
+                # 6a. Source không còn row nhưng history chỉ có INSERT/UPDATE:
+                #     dữ liệu đã biến mất sau transaction nên không phát bản cũ.
                 if not deletes:
                     decision_trace.append(
                         {
@@ -508,6 +560,9 @@ class Reconciler:
                         }
                     )
                     continue
+
+                # 6b. Source không còn row và history có DELETE:
+                #     lấy DELETE cuối cùng làm đại diện và phát op=d.
                 decisions.append((deletes[-1], "d"))
                 decision_trace.append(
                     {
@@ -520,6 +575,8 @@ class Reconciler:
                         "reason": "deleted key is absent from current source",
                     }
                 )
+
+        # 7. Trả quyết định cho bước dựng Kafka record và trace để debug.
         return decisions, decision_trace
 
     @staticmethod
@@ -534,6 +591,7 @@ class Reconciler:
         table_count: int,
     ) -> tuple[list[RepairRecord], dict[str, int]]:
         """Bước 7: chuyển quyết định thành key/value/header kiểu Debezium."""
+        # 1. Khởi tạo bộ đếm kết quả và danh sách message sẽ gửi lên Kafka.
         stats = {
             "create": 0,
             "update": 0,
@@ -542,9 +600,14 @@ class Reconciler:
         }
         records: list[RepairRecord] = []
         collection_orders: dict[TableRef, int] = defaultdict(int)
+
+        # 2. Mỗi decision là một event đã được đối chiếu với dữ liệu hiện tại
+        #    và được quyết định emit dưới dạng create/update/delete (c/u/d).
         for replay, op in decisions:
             metadata = metadata_by_table[replay.table]
-            stats[{"c": "create", "d": "delete"}[op]] += 1
+            stats[{"c": "create", "u": "update", "d": "delete"}[op]] += 1
+
+            # 3. Dựng topic đích theo format: <topic.prefix>.<schema>.<table>.
             topic = ".".join(
                 (
                     connector_config.topic_prefix,
@@ -552,6 +615,8 @@ class Reconciler:
                     adjust_topic_component(replay.table.name),
                 )
             )
+
+            # 4. Gắn thứ tự transaction nếu connector bật transaction metadata.
             collection_orders[replay.table] += 1
             transaction = None
             if connector_config.provide_transaction_metadata:
@@ -560,6 +625,8 @@ class Reconciler:
                     "total_order": replay.order,
                     "data_collection_order": collection_orders[replay.table],
                 }
+
+            # 5. Dựng Kafka key, Debezium envelope và thời điểm app tạo message.
             processing_ns = time.time_ns()
             records.append(
                 RepairRecord(
@@ -586,6 +653,9 @@ class Reconciler:
                         "ts_us": processing_ns // 1_000,
                         "ts_ns": processing_ns,
                     },
+
+                    # 6. Gắn context header để downstream nhận diện connector,
+                    #    task và lần chạy đã tạo ra event remediation.
                     headers=(
                         (
                             "__debezium.context.connectorName",
@@ -606,6 +676,8 @@ class Reconciler:
                     ),
                 )
             )
+
+        # 7. Chỉ trả dữ liệu đã dựng; bước publish Kafka được thực hiện bên ngoài.
         return records, stats
 
     @staticmethod

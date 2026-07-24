@@ -7,6 +7,8 @@ from typing import Any
 
 @dataclass(frozen=True)
 class AlertEvent:
+    """Request đầu vào của một abandoned transaction, được tạo từ webhook/Kafka."""
+
     connector: str
     xid: str
     detected_at: datetime
@@ -19,6 +21,8 @@ class AlertEvent:
 
 @dataclass(frozen=True)
 class TableRef:
+    """Định danh duy nhất một bảng Oracle bằng OWNER và TABLE_NAME."""
+
     owner: str
     name: str
 
@@ -29,6 +33,8 @@ class TableRef:
 
 @dataclass(frozen=True)
 class TransactionTable:
+    """Tóm tắt số DML và khoảng SCN của một table trong transaction."""
+
     table: TableRef
     change_count: int
     start_scn: int
@@ -39,6 +45,8 @@ class TransactionTable:
 
 @dataclass(frozen=True)
 class TableMetadata:
+    """Schema table dùng để dựng SELECT, đọc PK và serialize đúng kiểu dữ liệu."""
+
     table: TableRef
     columns: tuple[str, ...]
     key_columns: tuple[str, ...]
@@ -50,6 +58,8 @@ class TableMetadata:
 
 @dataclass(frozen=True)
 class MinedChange:
+    """Một DML đã parse từ LogMiner; before/after_delta có thể chỉ chứa cột đổi."""
+
     table: TableRef
     operation: str
     scn: int
@@ -70,6 +80,8 @@ class MinedChange:
 
 @dataclass(frozen=True)
 class ReplayEvent:
+    """Event I/U/D đầy đủ sau khi ghép delta với source row và state transaction."""
+
     table: TableRef
     operation: str
     scn: int
@@ -91,6 +103,8 @@ class ReplayEvent:
 
 @dataclass(frozen=True)
 class RepairRecord:
+    """Kafka message cuối gồm topic, key, Debezium value và context headers."""
+
     topic: str
     key: dict[str, Any]
     value: dict[str, Any] | None

@@ -303,6 +303,62 @@ def test_reconciler_converges_each_key_to_current_source_state() -> None:
     }
 
 
+def test_update_only_history_keeps_debezium_update_operation() -> None:
+    replay = reconstruct_events(
+        [
+            change(
+                "UPDATE",
+                1,
+                "RID1",
+                before={"ID": "1", "PAYLOAD": "old"},
+                after={"ID": "1", "PAYLOAD": "mined-new"},
+            )
+        ],
+        {TABLE: METADATA},
+        lambda _metadata, _key: {"ID": "1", "PAYLOAD": "old"},
+    )[0]
+    current = {"ID": "1", "PAYLOAD": "source-current"}
+
+    decisions, trace = Reconciler._choose_repairs(
+        {(TABLE, ("1",)): [replay]},
+        {TABLE: {("1",): current}},
+        {TABLE: METADATA},
+    )
+
+    repaired, output_op = decisions[0]
+    assert output_op == "u"
+    assert repaired.operation == "UPDATE"
+    assert repaired.before == {"ID": "1", "PAYLOAD": "old"}
+    assert repaired.after == current
+    assert trace[0]["output_op"] == "u"
+
+    records, stats = Reconciler._build_kafka_records(
+        decisions,
+        AlertEvent(
+            "oracle",
+            "01001000E6030000",
+            datetime.now(timezone.utc),
+            "log",
+        ),
+        ConnectorRuntimeConfig(
+            "server",
+            (),
+            (),
+            connector_version="3.5.2.Final",
+        ),
+        {TABLE: METADATA},
+        100,
+        None,
+        None,
+        1,
+    )
+    assert records[0].value is not None
+    assert records[0].value["op"] == "u"
+    assert records[0].value["before"] == {"ID": "1", "PAYLOAD": "old"}
+    assert records[0].value["after"] == current
+    assert stats == {"create": 0, "update": 1, "delete": 0, "tables": 1}
+
+
 def test_reconciler_builds_schema_enabled_composite_primary_key() -> None:
     table = COMPOSITE_KEY_METADATA.table
     mined = replace(
