@@ -22,4 +22,3 @@ class EscalationClient:
             response.raise_for_status()
         except Exception:
             logger.exception("Failed to send remediation escalation")
-

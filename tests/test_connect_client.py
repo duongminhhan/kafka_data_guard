@@ -5,9 +5,9 @@ import threading
 import time
 from typing import Any
 
-from remediation import connect_client
-from remediation.connect_client import ConnectClient, ConnectorRuntimeConfig
-from remediation.models import TableRef
+from remediation.connect import client as connect_client
+from remediation.connect.client import ConnectClient, ConnectorRuntimeConfig
+from remediation.domain.models import TableRef
 
 
 class _Response:

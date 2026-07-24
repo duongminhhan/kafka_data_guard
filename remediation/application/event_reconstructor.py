@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from remediation.models import MinedChange, ReplayEvent, TableMetadata, TableRef
+from remediation.domain.models import MinedChange, ReplayEvent, TableMetadata, TableRef
 
 
 class IncompleteRedoError(RuntimeError):
@@ -21,7 +21,7 @@ def _key(values: dict[str, Any], columns: tuple[str, ...]) -> dict[str, Any]:
         )
     return {column: values[column] for column in columns}
 
-
+# dựng message Kafka
 def reconstruct_events(
     changes: list[MinedChange],
     metadata_by_table: dict[TableRef, TableMetadata],
@@ -43,13 +43,19 @@ def reconstruct_events(
         identity = (change.table, change.row_id)
         current = state.get(identity)
 
+
         if operation == "INSERT":
             if current is not None:
                 raise IncompleteRedoError(
                     f"INSERT reused live ROW_ID {change.row_id} inside one transaction"
                 )
             after = {column: None for column in metadata.columns}
+
+            # được parse từ SQL_REDO của INSERT.
+
+
             after.update(change.after_delta)
+
             event_key = _key(after, metadata.key_columns)
             before = None
             state[identity] = after.copy()

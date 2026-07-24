@@ -3,8 +3,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping
 
-from remediation.models import TableMetadata, TableRef
-from remediation.oracle_client import OracleClient
+from remediation.domain.models import TableMetadata, TableRef
+from remediation.oracle.client import OracleClient
 
 
 class _Cursor:

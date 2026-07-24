@@ -14,4 +14,3 @@ def quote_identifier(value: str) -> str:
 
 def quote_qualified_name(value: str) -> str:
     return ".".join(quote_identifier(part) for part in value.split("."))
-

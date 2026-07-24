@@ -4,10 +4,10 @@ import pytest
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from remediation.connect_client import ConnectorRuntimeConfig
-from remediation.models import AlertEvent, MinedChange, TableMetadata, TableRef, TransactionTable
-from remediation.reconcile_logic import IncompleteRedoError, reconstruct_events
-from remediation.reconciler import IncompleteTransactionError, Reconciler, adjust_topic_component
+from remediation.connect.client import ConnectorRuntimeConfig
+from remediation.domain.models import AlertEvent, MinedChange, TableMetadata, TableRef, TransactionTable
+from remediation.application.event_reconstructor import IncompleteRedoError, reconstruct_events
+from remediation.application.reconciler import IncompleteTransactionError, Reconciler, adjust_topic_component
 
 
 TABLE = TableRef("C##CDCUSER", "CDC_REMEDIATION_POC")

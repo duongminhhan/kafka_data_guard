@@ -9,7 +9,7 @@ from typing import Any
 
 from confluent_kafka import Producer
 
-from remediation.models import RepairRecord
+from remediation.domain.models import RepairRecord
 
 
 TRANSACTION_TIMEOUT_MS = 60_000

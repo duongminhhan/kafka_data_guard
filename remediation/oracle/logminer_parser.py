@@ -1,15 +1,62 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
-from remediation.models import TableMetadata
+from remediation.domain.models import TableMetadata
 
 
 class LogMinerSqlParseError(RuntimeError):
     """LogMiner SQL_REDO/SQL_UNDO cannot be converted safely to column deltas."""
 
 
+def parse_logminer_change(
+    operation: str,
+    sql_redo: str | None,
+    sql_undo: str | None,
+    metadata: TableMetadata,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bước 2: entrypoint parse LogMiner thành (before_delta, after_delta)."""
+    operation = operation.upper()
+    redo = (sql_redo or "").strip()
+    undo = (sql_undo or "").strip()
+
+    # INSERT: dữ liệu mới nằm trong VALUES của SQL_REDO.
+    if operation == "INSERT":
+        if not redo:
+            raise LogMinerSqlParseError("INSERT has no SQL_REDO")
+        return {}, _parse_insert(redo, metadata)
+
+    # DELETE: dữ liệu cũ ưu tiên lấy từ câu INSERT trong SQL_UNDO.
+    if operation == "DELETE":
+        if undo:
+            return _parse_insert(undo, metadata), {}
+        if redo:
+            return _parse_delete(redo, metadata), {}
+        raise LogMinerSqlParseError("DELETE has neither SQL_UNDO nor SQL_REDO")
+
+    # UPDATE: SQL_UNDO cho giá trị cũ, SQL_REDO cho giá trị mới.
+    if operation == "UPDATE":
+        if not redo:
+            raise LogMinerSqlParseError("UPDATE has no SQL_REDO")
+        redo_set, redo_where = _parse_update(redo, metadata)
+        before = dict(redo_where)
+        after: dict[str, Any] = {}
+        if undo:
+            undo_set, undo_where = _parse_update(undo, metadata)
+            before.update(undo_set)
+            after.update(undo_where)
+        after.update(redo_set)
+        for key_column in metadata.key_columns:
+            if key_column in before and key_column not in after:
+                after[key_column] = before[key_column]
+        return before, after
+
+    raise LogMinerSqlParseError(f"Unsupported LogMiner operation: {operation}")
+
+
+# Các helper bên dưới chỉ tách SQL thành identifier và value.
 def _scan_parts(text: str, *, delimiter: str) -> list[str]:
     parts: list[str] = []
     start = 0
@@ -194,6 +241,37 @@ def _parse_value(expression: str) -> Any:
     raise LogMinerSqlParseError(f"Unsupported Oracle value: {expression}")
 
 
+def _parse_oracle_datetime(value: str) -> datetime:
+    normalized = value.strip().replace("Z", "+00:00")
+    fraction = re.search(r"\.(\d+)", normalized)
+    if fraction and len(fraction.group(1)) > 6:
+        normalized = (
+            normalized[: fraction.start(1)]
+            + fraction.group(1)[:6]
+            + normalized[fraction.end(1) :]
+        )
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise LogMinerSqlParseError(
+            f"Unsupported Oracle date/timestamp literal: {value}"
+        ) from exc
+
+
+def _parse_column_value(
+    column: str, expression: str, metadata: TableMetadata
+) -> Any:
+    value = _parse_value(expression)
+    if value is None:
+        return None
+    data_type = metadata.column_types[column].upper()
+    if data_type == "DATE" or data_type.startswith("TIMESTAMP"):
+        return _parse_oracle_datetime(str(value))
+    if data_type in {"BINARY_FLOAT", "BINARY_DOUBLE"}:
+        return float(value)
+    return value
+
+
 def _parse_assignments(
     text: str, metadata: TableMetadata, *, separator: str
 ) -> dict[str, Any]:
@@ -212,7 +290,7 @@ def _parse_assignments(
             )
         column = _canonical_column(equality[0], metadata)
         if column is not None:
-            values[column] = _parse_value(equality[1])
+            values[column] = _parse_column_value(column, equality[1], metadata)
     return values
 
 
@@ -234,7 +312,7 @@ def _parse_insert(sql: str, metadata: TableMetadata) -> dict[str, Any]:
     for identifier, expression in zip(columns, expressions):
         column = _canonical_column(identifier, metadata)
         if column is not None:
-            result[column] = _parse_value(expression)
+            result[column] = _parse_column_value(column, expression, metadata)
     return result
 
 
@@ -265,44 +343,3 @@ def _parse_delete(sql: str, metadata: TableMetadata) -> dict[str, Any]:
         metadata,
         separator="AND",
     )
-
-
-def parse_logminer_change(
-    operation: str,
-    sql_redo: str | None,
-    sql_undo: str | None,
-    metadata: TableMetadata,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    operation = operation.upper()
-    redo = (sql_redo or "").strip()
-    undo = (sql_undo or "").strip()
-
-    if operation == "INSERT":
-        if not redo:
-            raise LogMinerSqlParseError("INSERT has no SQL_REDO")
-        return {}, _parse_insert(redo, metadata)
-
-    if operation == "DELETE":
-        if undo:
-            return _parse_insert(undo, metadata), {}
-        if redo:
-            return _parse_delete(redo, metadata), {}
-        raise LogMinerSqlParseError("DELETE has neither SQL_UNDO nor SQL_REDO")
-
-    if operation == "UPDATE":
-        if not redo:
-            raise LogMinerSqlParseError("UPDATE has no SQL_REDO")
-        redo_set, redo_where = _parse_update(redo, metadata)
-        before = dict(redo_where)
-        after: dict[str, Any] = {}
-        if undo:
-            undo_set, undo_where = _parse_update(undo, metadata)
-            before.update(undo_set)
-            after.update(undo_where)
-        after.update(redo_set)
-        for key_column in metadata.key_columns:
-            if key_column in before and key_column not in after:
-                after[key_column] = before[key_column]
-        return before, after
-
-    raise LogMinerSqlParseError(f"Unsupported LogMiner operation: {operation}")

@@ -5,9 +5,9 @@ from threading import Lock
 from time import sleep
 from unittest.mock import patch
 
-import remediation.oracle_client as oracle_client_module
-from remediation.models import TableMetadata, TableRef
-from remediation.oracle_client import OracleClient
+import remediation.oracle.client as oracle_client_module
+from remediation.domain.models import TableMetadata, TableRef
+from remediation.oracle.client import OracleClient
 
 
 TABLE = TableRef("CDCUSER", "ORDERS")

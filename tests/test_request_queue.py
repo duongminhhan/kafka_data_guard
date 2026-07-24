@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from remediation.models import AlertEvent
-from remediation.request_queue import event_to_request, request_to_event
+from remediation.domain.models import AlertEvent
+from remediation.kafka.request_queue import event_to_request, request_to_event
 
 
 def test_request_message_round_trip() -> None:

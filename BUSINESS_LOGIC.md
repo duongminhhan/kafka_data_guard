@@ -13,9 +13,6 @@ App là pipeline **Oracle read-only → Kafka publish-only**:
 - không kết nối và không ghi vào database đích;
 - không có Oracle side table lưu trạng thái hay chống trùng.
 
-Các file `scripts/game_day_*.py` có DML chỉ dùng để sinh transaction kiểm thử thủ công;
-chúng không được gọi bởi service và không thuộc pipeline runtime.
-
 ## 1. Tiếp nhận request
 
 Webhook parse đầy đủ dòng log và publish request vào `cdc-remediation-requests`:
@@ -130,8 +127,11 @@ Mỗi logical row change được đọc từ `V$LOGMNR_CONTENTS`, lọc đúng 
 
 ```sql
 SELECT
-    SEQUENCE#, SCN, RS_ID, SSN, ROW_ID, OPERATION, COMMIT_SCN, TIMESTAMP,
-    START_TIMESTAMP, COMMIT_TIMESTAMP, THREAD#, USERNAME, SQL_REDO
+    SCN, RS_ID, SSN, CSF, SEQUENCE#,
+    RAWTOHEX(XID) AS XID_HEX,
+    SEG_OWNER AS TABLE_OWNER, TABLE_NAME, ROW_ID,
+    OPERATION, SQL_REDO, SQL_UNDO, COMMIT_SCN, TIMESTAMP,
+    START_TIMESTAMP, COMMIT_TIMESTAMP, THREAD#, USERNAME
 FROM V$LOGMNR_CONTENTS
 WHERE XID = HEXTORAW(:transaction_id)
   AND OPERATION IN ('INSERT', 'UPDATE', 'DELETE')
@@ -142,10 +142,17 @@ ORDER BY SEQUENCE#, SCN, RS_ID, SSN;
 nhiều DML có thể cùng SCN, còn thứ tự vật lý `RS_ID` không luôn trùng thứ tự nghiệp vụ,
 đặc biệt với chuỗi insert-update-delete trên cùng row.
 
-Giá trị cột được đọc bằng `DBMS_LOGMNR.COLUMN_PRESENT` và
-`DBMS_LOGMNR.MINE_VALUE` từ `UNDO_VALUE`/`REDO_VALUE`; service không parse hoặc execute
-chuỗi `SQL_REDO`/`SQL_UNDO`. Với bảng rộng, cột được chia thành chunk để không vượt giới
-hạn select-list Oracle.
+Service ghép liên tiếp `SQL_REDO` và `SQL_UNDO` khi `CSF=1`, sau đó parse câu SQL theo
+metadata động của bảng; các câu SQL này chỉ được đọc, không bao giờ được execute:
+
+- `INSERT`: lấy `after` từ column/value list của `SQL_REDO`.
+- `UPDATE`: lấy giá trị cũ từ `WHERE` của `SQL_REDO` và `SET` của `SQL_UNDO`; lấy giá
+  trị mới từ `SET` của `SQL_REDO` và `WHERE` của `SQL_UNDO`.
+- `DELETE`: lấy `before` từ câu `INSERT` trong `SQL_UNDO`; nếu không có `SQL_UNDO` thì
+  fallback sang `WHERE` của `SQL_REDO`.
+- Bỏ predicate `ROWID` khi dựng key; primary key được xác định theo metadata của bảng.
+- Nếu literal/hàm Oracle không được parser hỗ trợ, statement thiếu fragment hoặc thiếu
+  primary key, transaction fail-closed và không phát repair message.
 
 ROWID được chuyển động bằng `DBMS_ROWID` về dạng Debezium (data-object number bằng 0),
 không phụ thuộc tên bảng hay physical object id của môi trường. Ví dụ physical ROWID
@@ -247,10 +254,9 @@ discover logs → ADD_LOGFILE → START_LOGMNR → query XID → END_LOGMNR
 ```
 
 `END_LOGMNR` luôn chạy trong `finally`; connection đang mining không được trả lại pool.
-DBA chạy [scripts/oracle_logminer_grants.sql](scripts/oracle_logminer_grants.sql) trong
-`CDB$ROOT` cho common remediation user. Ngoài quyền LogMiner/`SET CONTAINER`, user vẫn cần
-`SELECT ANY TRANSACTION`, quyền đọc dictionary, `SELECT` và `FLASHBACK` trên các source
-table.
+DBA cấp quyền trong `CDB$ROOT` cho common remediation user. Ngoài quyền
+LogMiner/`SET CONTAINER`, user vẫn cần `SELECT ANY TRANSACTION`, quyền đọc dictionary,
+`SELECT` và `FLASHBACK` trên các source table.
 
 UAT phải giữ online/archive redo lâu hơn độ trễ alert + retry. Nếu redo đã bị overwrite,
 xóa hoặc không còn truy cập được thì không thể replay chính xác. Direct replay là event

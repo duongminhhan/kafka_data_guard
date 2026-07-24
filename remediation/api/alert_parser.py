@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from remediation.models import AlertEvent
+from remediation.domain.models import AlertEvent
 
 
 # Oracle FLASHBACK_TRANSACTION_QUERY.XID is RAW(8), represented here as 16 hex chars.

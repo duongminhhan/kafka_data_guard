@@ -8,17 +8,17 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import oracledb
 
-from remediation.models import (
+from remediation.domain.models import (
     TableMetadata,
     TableRef,
     TransactionTable,
     MinedChange,
 )
-from remediation.logminer_sql_parser import (
+from remediation.oracle.logminer_parser import (
     LogMinerSqlParseError,
     parse_logminer_change,
 )
-from remediation.sql_utils import quote_identifier, quote_qualified_name
+from remediation.oracle.sql_utils import quote_identifier, quote_qualified_name
 
 
 def _row_to_dict(cursor: oracledb.Cursor, row: tuple[Any, ...]) -> dict[str, Any]:
@@ -26,6 +26,12 @@ def _row_to_dict(cursor: oracledb.Cursor, row: tuple[Any, ...]) -> dict[str, Any
 
 
 class OracleClient:
+    """
+    Chỉ chứa thao tác Oracle. Thứ tự gọi từ Reconciler:
+    find_transaction_tables -> get_table_metadata -> mine_transaction
+    -> get_rows_as_of -> get_current_rows.
+    """
+
     TABLE_METADATA_CACHE_TTL_SECONDS = 600.0
 
     @staticmethod
@@ -96,6 +102,7 @@ class OracleClient:
     def find_transaction_tables(
         self, xid: str, pdb_name: str | None = None
     ) -> list[TransactionTable]:
+        """Bước 1: tìm table và khoảng SCN theo XID."""
         sql = """
             SELECT TABLE_OWNER, TABLE_NAME, OPERATION, COUNT(*) AS CHANGE_COUNT,
                    MIN(START_SCN) AS START_SCN,
@@ -142,6 +149,7 @@ class OracleClient:
     def get_table_metadata(
         self, table: TableRef, pdb_name: str | None = None
     ) -> TableMetadata:
+        """Bước 1: lấy columns, kiểu dữ liệu và primary key."""
         cache_key = (
             (pdb_name or "").upper(),
             table.owner.upper(),
@@ -201,6 +209,7 @@ class OracleClient:
             try:
                 if switched:
                     self._set_container(cursor, pdb_name)
+                self._observe_query("table_columns", columns_sql, params)
                 cursor.execute(columns_sql, params)
                 column_rows = [
                     (
@@ -212,6 +221,7 @@ class OracleClient:
                     )
                     for row in cursor
                 ]
+                self._observe_query("primary_keys", keys_sql, params)
                 cursor.execute(keys_sql, params)
                 key_columns = tuple(str(row[0]) for row in cursor)
             finally:
@@ -234,12 +244,20 @@ class OracleClient:
             column_defaults={row[0]: row[4] for row in column_rows},
         )
 
-    @staticmethod
     def _end_logminer(
-        cursor: oracledb.Cursor, *, ignore_not_started: bool = False
+        self,
+        cursor: oracledb.Cursor,
+        *,
+        ignore_not_started: bool = False,
     ) -> None:
+        sql = """
+            BEGIN
+                DBMS_LOGMNR.END_LOGMNR;
+            END;
+        """
+        self._observe_query("logminer_end", sql, {})
         try:
-            cursor.callproc("DBMS_LOGMNR.END_LOGMNR")
+            cursor.execute(sql)
         except oracledb.DatabaseError as exc:
             error = exc.args[0]
             if ignore_not_started and getattr(error, "code", None) == 1307:
@@ -344,6 +362,7 @@ class OracleClient:
         xid: str,
         metadata_by_table: dict[TableRef, TableMetadata],
     ) -> list[MinedChange]:
+        """Bước 2: ghép CSF rồi parse SQL_REDO/SQL_UNDO thành delta."""
         sql = """
                 SELECT SCN, RS_ID, SSN, CSF, SEQUENCE# AS TX_SEQUENCE,
                        RAWTOHEX(XID) AS XID_HEX,
@@ -454,6 +473,7 @@ class OracleClient:
         pdb_name: str | None = None,
         include_redo_sql: bool = False,
     ) -> list[MinedChange]:
+        """Bước 2: mở LogMiner, đọc DML và luôn đóng mining session."""
         with self.connection() as connection, connection.cursor() as cursor:
             container = self._current_container(cursor)
             if pdb_name and container.upper() != "CDB$ROOT":
@@ -494,6 +514,7 @@ class OracleClient:
         scn: int | None,
         pdb_name: str | None,
     ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        """Bước 3/5: SELECT batch theo PK, có hoặc không AS OF SCN."""
         if not keys:
             return {}
 
@@ -556,6 +577,7 @@ class OracleClient:
         scn: int,
         pdb_name: str | None = None,
     ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        """Bước 3: lấy full row trước transaction."""
         return self._get_rows(
             metadata, keys, scn=scn, pdb_name=pdb_name
         )
@@ -576,6 +598,7 @@ class OracleClient:
         keys: Sequence[dict[str, Any]],
         pdb_name: str | None = None,
     ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        """Bước 5: lấy full row hiện tại để quyết định c/d/bypass."""
         return self._get_rows(
             metadata, keys, scn=None, pdb_name=pdb_name
         )

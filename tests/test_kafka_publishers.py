@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from remediation import kafka_publisher, request_queue
-from remediation.models import AlertEvent, RepairRecord
+from remediation.kafka import publisher as kafka_publisher
+from remediation.kafka import request_queue
+from remediation.domain.models import AlertEvent, RepairRecord
 
 
 class FakeProducer:

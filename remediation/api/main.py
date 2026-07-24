@@ -5,20 +5,21 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 
-from remediation.config import Settings
-from remediation.connect_client import ConnectClient
-from remediation.escalation import EscalationClient
-from remediation.kafka_publisher import KafkaPublisher
-from remediation.log_parser import parse_alertmanager_payload
-from remediation.logging_utils import configure_logging
-from remediation.oracle_client import OracleClient
-from remediation.reconciler import Reconciler
-from remediation.request_queue import RequestConsumer, RequestPublisher, REQUEST_TOPIC
-from remediation.service import RemediationService
+from remediation.support.config import Settings
+from remediation.connect.client import ConnectClient
+from remediation.support.escalation import EscalationClient
+from remediation.kafka.publisher import KafkaPublisher
+from remediation.api.alert_parser import parse_alertmanager_payload
+from remediation.support.logging_utils import configure_logging
+from remediation.oracle.client import OracleClient
+from remediation.application.reconciler import Reconciler
+from remediation.kafka.request_queue import RequestConsumer, RequestPublisher, REQUEST_TOPIC
+from remediation.application.service import RemediationService
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Khởi tạo một pipeline dùng chung cho cả webhook và Kafka request consumer.
     settings = Settings.from_env()
     configure_logging("INFO")
     oracle = OracleClient(
@@ -64,6 +65,7 @@ def healthz() -> dict[str, str]:
 
 @app.post("/webhooks/alertmanager", status_code=202)
 async def alertmanager_webhook(request: Request) -> dict[str, Any]:
+    # Webhook chỉ parse alert và đẩy request lên Kafka, chưa query Oracle tại đây.
     try:
         events = parse_alertmanager_payload(await request.json())
     except (ValueError, TypeError) as exc:
@@ -78,6 +80,7 @@ async def alertmanager_webhook(request: Request) -> dict[str, Any]:
         }
 
     try:
+        # Consumer nền sẽ đọc request này và gọi RemediationService.
         request.app.state.request_publisher.publish(events)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Queue publish failed: {exc}") from exc

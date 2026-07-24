@@ -7,10 +7,18 @@ from dataclasses import replace
 from datetime import timezone
 from typing import Any, Callable
 
-from remediation.connect_client import ConnectorRuntimeConfig
-from remediation.models import AlertEvent, RepairRecord, ReplayEvent, TableRef, TransactionTable
-from remediation.oracle_client import OracleClient
-from remediation.reconcile_logic import reconstruct_events
+from remediation.connect.client import ConnectorRuntimeConfig
+from remediation.domain.models import (
+    AlertEvent,
+    MinedChange,
+    RepairRecord,
+    ReplayEvent,
+    TableMetadata,
+    TableRef,
+    TransactionTable,
+)
+from remediation.oracle.client import OracleClient
+from remediation.application.event_reconstructor import reconstruct_events
 
 
 class FlashbackDataMissingError(RuntimeError):
@@ -181,7 +189,21 @@ def _message_key(
     }
 
 
+Row = dict[str, Any]
+RowIdentity = tuple[Any, ...]
+RowsByTable = dict[TableRef, dict[RowIdentity, Row]]
+GroupedEvents = dict[tuple[TableRef, RowIdentity], list[ReplayEvent]]
+RepairDecision = tuple[ReplayEvent, str]
+
+
 class Reconciler:
+    """
+    Điều phối remediation theo đúng thứ tự đọc trong build_repairs().
+
+    Các hàm private bên dưới cũng được sắp theo đúng thứ tự gọi:
+    phạm vi transaction -> seed rows -> current rows -> quyết định -> Kafka record.
+    """
+
     def __init__(
         self,
         oracle: OracleClient,
@@ -194,11 +216,94 @@ class Reconciler:
         if self._trace_observer is not None:
             self._trace_observer(stage, value)
 
+    # BẮT ĐẦU ĐỌC BUSINESS LOGIC TỪ HÀM NÀY.
     def build_repairs(
         self,
         event: AlertEvent,
         connector_config: ConnectorRuntimeConfig,
     ) -> tuple[list[RepairRecord], dict[str, int]]:
+        """Luồng chính: đọc từ BƯỚC 1 đến BƯỚC 7."""
+
+        # BƯỚC 1: Tìm table, SCN và metadata của transaction.
+        included, by_table = self._find_transaction_scope(event, connector_config)
+        if not by_table:
+            return [], {"create": 0, "update": 0, "delete": 0, "tables": 0}
+
+        metadata_by_table = {
+            table: self._oracle.get_table_metadata(table, connector_config.pdb_name)
+            for table in by_table
+        }
+        start_scn, commit_scn, start_time_ms, commit_time_ms = (
+            self._transaction_bounds(included)
+        )
+
+        # BƯỚC 2: Đọc và parse DML theo đúng thứ tự từ LogMiner.
+        mined = self._oracle.mine_transaction(
+            event.xid,
+            metadata_by_table,
+            start_scn,
+            commit_scn,
+            connector_config.pdb_name,
+            connector_config.include_redo_sql,
+        )
+        self._trace("mined_dml", mined)
+        self._validate_mined_count(mined, included)
+
+        # BƯỚC 3: SELECT AS OF SCN để lấy full row trước transaction.
+        seed_rows = self._load_seed_rows(
+            mined,
+            metadata_by_table,
+            start_scn,
+            connector_config.pdb_name,
+        )
+        self._trace("source_as_of_rows", seed_rows)
+
+        def seed_loader(metadata: Any, key: Row) -> Row | None:
+            identity = self._row_identity(key, metadata.key_columns)
+            return seed_rows.get(metadata.table, {}).get(identity)
+
+        # BƯỚC 4: Ghép seed row với delta để dựng event I/U/D đầy đủ.
+        replay_events = reconstruct_events(mined, metadata_by_table, seed_loader)
+        self._trace("reconstructed_events", replay_events)
+
+        # BƯỚC 5: Gom theo PK và SELECT lại trạng thái hiện tại dưới nguồn.
+        grouped = self._group_events_by_primary_key(replay_events, metadata_by_table)
+        current_rows = self._load_current_rows(
+            grouped,
+            metadata_by_table,
+            connector_config.pdb_name,
+        )
+        self._trace("source_current_rows", current_rows)
+
+        # BƯỚC 6: So sánh history với source hiện tại để chọn c/d/bypass.
+        decisions, decision_trace = self._choose_repairs(
+            grouped,
+            current_rows,
+            metadata_by_table,
+        )
+        self._trace("decisions", decision_trace)
+
+        # BƯỚC 7: Dựng Kafka record; service chính sẽ publish sau khi hàm trả về.
+        records, stats = self._build_kafka_records(
+            decisions,
+            event,
+            connector_config,
+            metadata_by_table,
+            start_scn,
+            start_time_ms,
+            commit_time_ms,
+            len(by_table),
+        )
+        self._trace("repair_records", records)
+        self._trace("stats", stats)
+        return records, stats
+
+    def _find_transaction_scope(
+        self,
+        event: AlertEvent,
+        connector_config: ConnectorRuntimeConfig,
+    ) -> tuple[list[TransactionTable], dict[TableRef, list[TransactionTable]]]:
+        """Bước 1: lọc các table thuộc phạm vi connector."""
         summaries = self._oracle.find_transaction_tables(
             event.xid, connector_config.pdb_name
         )
@@ -214,34 +319,39 @@ class Reconciler:
         if not connector_config.connector_version:
             raise ValueError("Connector version is required for Debezium-compatible replay")
 
-        included = [summary for summary in summaries if connector_config.includes(summary.table)]
+        included = [
+            summary
+            for summary in summaries
+            if connector_config.includes(summary.table)
+        ]
         by_table: dict[TableRef, list[TransactionTable]] = defaultdict(list)
         for summary in included:
             by_table[summary.table].append(summary)
-        if not by_table:
-            return [], {"create": 0, "update": 0, "delete": 0, "tables": 0}
+        return included, dict(by_table)
 
-        metadata_by_table = {
-            table: self._oracle.get_table_metadata(table, connector_config.pdb_name)
-            for table in by_table
-        }
+    @staticmethod
+    def _transaction_bounds(
+        included: list[TransactionTable],
+    ) -> tuple[int, int, int | None, int | None]:
+        """Bước 1: tính khoảng SCN/time bao phủ toàn transaction."""
         start_scn = min(item.start_scn for item in included)
         commit_scn = max(int(item.commit_scn or 0) for item in included)
-        start_times = [item.start_time for item in included if item.start_time is not None]
+        start_times = [
+            item.start_time for item in included if item.start_time is not None
+        ]
         commit_times = [
             item.commit_time for item in included if item.commit_time is not None
         ]
         start_time_ms = _epoch_ms(min(start_times)) if start_times else None
         commit_time_ms = _epoch_ms(max(commit_times)) if commit_times else None
-        mined = self._oracle.mine_transaction(
-            event.xid,
-            metadata_by_table,
-            start_scn,
-            commit_scn,
-            connector_config.pdb_name,
-            connector_config.include_redo_sql,
-        )
-        self._trace("mined_dml", mined)
+        return start_scn, commit_scn, start_time_ms, commit_time_ms
+
+    @staticmethod
+    def _validate_mined_count(
+        mined: list[MinedChange],
+        included: list[TransactionTable],
+    ) -> None:
+        """Bước 2: không replay nếu LogMiner trả thiếu event."""
         expected_count = sum(item.change_count for item in included)
         if len(mined) != expected_count:
             raise IncompleteTransactionError(
@@ -249,8 +359,16 @@ class Reconciler:
                 f"{expected_count} from FLASHBACK_TRANSACTION_QUERY"
             )
 
+    def _load_seed_rows(
+        self,
+        mined: list[MinedChange],
+        metadata_by_table: dict[TableRef, TableMetadata],
+        start_scn: int,
+        pdb_name: str | None,
+    ) -> RowsByTable:
+        """Bước 3: lấy full row trước transaction cho UPDATE/DELETE."""
         seed_keys_by_table: dict[
-            TableRef, dict[tuple[Any, ...], dict[str, Any]]
+            TableRef, dict[RowIdentity, Row]
         ] = defaultdict(dict)
         for change in mined:
             if change.operation.upper() not in {"UPDATE", "DELETE"}:
@@ -264,65 +382,70 @@ class Reconciler:
                 column: change.before_delta[column]
                 for column in metadata.key_columns
             }
-            identity = tuple(key[column] for column in metadata.key_columns)
+            identity = self._row_identity(key, metadata.key_columns)
             seed_keys_by_table[change.table].setdefault(identity, key)
 
-        seed_rows_by_table: dict[
-            TableRef, dict[tuple[Any, ...], dict[str, Any]]
-        ] = {}
+        seed_rows: RowsByTable = {}
         for table, keys_by_identity in seed_keys_by_table.items():
             metadata = metadata_by_table[table]
-            seed_rows_by_table[table] = self._oracle.get_rows_as_of(
+            seed_rows[table] = self._oracle.get_rows_as_of(
                 metadata,
                 list(keys_by_identity.values()),
                 start_scn,
-                connector_config.pdb_name,
+                pdb_name,
             )
-        self._trace("source_as_of_rows", seed_rows_by_table)
+        return seed_rows
 
-        def seed_loader(metadata: Any, key: dict[str, Any]) -> dict[str, Any] | None:
-            identity = tuple(key[column] for column in metadata.key_columns)
-            return seed_rows_by_table.get(metadata.table, {}).get(identity)
-
-        replay_events = reconstruct_events(mined, metadata_by_table, seed_loader)
-        self._trace("reconstructed_events", replay_events)
-        stats = {"create": 0, "update": 0, "delete": 0, "tables": len(by_table)}
-        records: list[RepairRecord] = []
-        collection_orders: dict[TableRef, int] = defaultdict(int)
-
-        # Remediation converges downstream to the current source state. Multiple DML
-        # operations for the same primary key become at most one repair message.
-        grouped: dict[tuple[TableRef, tuple[Any, ...]], list[ReplayEvent]] = {}
+    @staticmethod
+    def _group_events_by_primary_key(
+        replay_events: list[ReplayEvent],
+        metadata_by_table: dict[TableRef, TableMetadata],
+    ) -> GroupedEvents:
+        """Bước 5: mỗi table + PK chỉ tạo tối đa một repair message."""
+        grouped: GroupedEvents = {}
         for replay in replay_events:
             metadata = metadata_by_table[replay.table]
             identity = (
                 replay.table,
-                tuple(replay.key[column] for column in metadata.key_columns),
+                Reconciler._row_identity(replay.key, metadata.key_columns),
             )
             grouped.setdefault(identity, []).append(replay)
+        return grouped
 
+    def _load_current_rows(
+        self,
+        grouped: GroupedEvents,
+        metadata_by_table: dict[TableRef, TableMetadata],
+        pdb_name: str | None,
+    ) -> RowsByTable:
+        """Bước 5: SELECT một lần mỗi table để đối chiếu source hiện tại."""
         current_keys_by_table: dict[
-            TableRef, dict[tuple[Any, ...], dict[str, Any]]
+            TableRef, dict[RowIdentity, Row]
         ] = defaultdict(dict)
         for (table, identity), replays in grouped.items():
             current_keys_by_table[table].setdefault(identity, replays[0].key)
 
-        current_rows_by_table: dict[
-            TableRef, dict[tuple[Any, ...], dict[str, Any]]
-        ] = {}
+        current_rows: RowsByTable = {}
         for table, keys_by_identity in current_keys_by_table.items():
-            current_rows_by_table[table] = self._oracle.get_current_rows(
+            current_rows[table] = self._oracle.get_current_rows(
                 metadata_by_table[table],
                 list(keys_by_identity.values()),
-                connector_config.pdb_name,
+                pdb_name,
             )
-        self._trace("source_current_rows", current_rows_by_table)
+        return current_rows
 
-        decisions: list[tuple[ReplayEvent, str]] = []
+    @staticmethod
+    def _choose_repairs(
+        grouped: GroupedEvents,
+        current_rows: RowsByTable,
+        metadata_by_table: dict[TableRef, TableMetadata],
+    ) -> tuple[list[RepairDecision], list[dict[str, Any]]]:
+        """Bước 6: áp dụng bốn nhánh c/d/bypass."""
+        decisions: list[RepairDecision] = []
         decision_trace: list[dict[str, Any]] = []
         for (table, identity), replays in grouped.items():
             metadata = metadata_by_table[replays[0].table]
-            current = current_rows_by_table.get(table, {}).get(identity)
+            current = current_rows.get(table, {}).get(identity)
             upserts = [
                 replay
                 for replay in replays
@@ -331,8 +454,7 @@ class Reconciler:
             deletes = [replay for replay in replays if replay.operation == "DELETE"]
 
             if current is not None:
-                # A delete-only history with a live row means the key was recreated by
-                # later business activity. Replaying the stale delete would corrupt it.
+                # Chỉ có DELETE nhưng source còn row: key đã được tạo lại, phải bypass.
                 if not upserts:
                     decision_trace.append(
                         {
@@ -373,8 +495,7 @@ class Reconciler:
                     }
                 )
             else:
-                # Only an observed delete can justify deleting downstream state. An
-                # insert/update whose key is now absent has no source row to rebuild.
+                # Không còn row: chỉ DELETE mới đủ điều kiện phát op=d.
                 if not deletes:
                     decision_trace.append(
                         {
@@ -399,8 +520,28 @@ class Reconciler:
                         "reason": "deleted key is absent from current source",
                     }
                 )
-        self._trace("decisions", decision_trace)
+        return decisions, decision_trace
 
+    @staticmethod
+    def _build_kafka_records(
+        decisions: list[RepairDecision],
+        event: AlertEvent,
+        connector_config: ConnectorRuntimeConfig,
+        metadata_by_table: dict[TableRef, TableMetadata],
+        start_scn: int,
+        start_time_ms: int | None,
+        commit_time_ms: int | None,
+        table_count: int,
+    ) -> tuple[list[RepairRecord], dict[str, int]]:
+        """Bước 7: chuyển quyết định thành key/value/header kiểu Debezium."""
+        stats = {
+            "create": 0,
+            "update": 0,
+            "delete": 0,
+            "tables": table_count,
+        }
+        records: list[RepairRecord] = []
+        collection_orders: dict[TableRef, int] = defaultdict(int)
         for replay, op in decisions:
             metadata = metadata_by_table[replay.table]
             stats[{"c": "create", "d": "delete"}[op]] += 1
@@ -465,6 +606,9 @@ class Reconciler:
                     ),
                 )
             )
-        self._trace("repair_records", records)
-        self._trace("stats", stats)
         return records, stats
+
+    @staticmethod
+    def _row_identity(row: Row, key_columns: tuple[str, ...]) -> RowIdentity:
+        """Khóa nội bộ dùng để tra row theo đúng thứ tự composite PK."""
+        return tuple(row[column] for column in key_columns)

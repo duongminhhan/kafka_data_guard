@@ -8,9 +8,9 @@ from typing import Any
 
 from confluent_kafka import Consumer, KafkaError, Producer, TopicPartition
 
-from remediation.kafka_publisher import json_bytes
-from remediation.models import AlertEvent
-from remediation.service import RemediationService
+from remediation.kafka.publisher import json_bytes
+from remediation.domain.models import AlertEvent
+from remediation.application.service import RemediationService
 
 
 logger = logging.getLogger(__name__)
@@ -175,6 +175,7 @@ class RequestConsumer:
                     continue
 
                 try:
+                    # Bắt đầu xử lý Oracle cho đúng một transaction request.
                     self._service.remediate(event)
                     consumer.commit(message=message, asynchronous=False)
                     logger.info(

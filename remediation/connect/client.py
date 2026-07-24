@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from remediation.models import TableRef
+from remediation.domain.models import TableRef
 
 
 _RUNTIME_CONFIG_CACHE_TTL_SECONDS = 60.0
