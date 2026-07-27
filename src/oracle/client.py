@@ -7,18 +7,17 @@ from time import monotonic
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import oracledb
-
-from remediation.domain.models import (
+from src.domain.models import (
     TableMetadata,
     TableRef,
     TransactionTable,
     MinedChange,
 )
-from remediation.oracle.logminer_parser import (
+from src.oracle.logminer_parser import (
     LogMinerSqlParseError,
     parse_logminer_change,
 )
-from remediation.oracle.sql_utils import quote_identifier, quote_qualified_name
+from src.oracle.sql_utils import quote_identifier, quote_qualified_name
 
 
 def _row_to_dict(cursor: oracledb.Cursor, row: tuple[Any, ...]) -> dict[str, Any]:

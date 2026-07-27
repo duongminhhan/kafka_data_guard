@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from remediation.domain.models import TableMetadata
+from src.domain.models import TableMetadata
 
 
 class LogMinerSqlParseError(RuntimeError):

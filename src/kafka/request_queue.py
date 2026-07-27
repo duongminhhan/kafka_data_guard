@@ -7,10 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from confluent_kafka import Consumer, KafkaError, Producer, TopicPartition
-
-from remediation.kafka.publisher import json_bytes
-from remediation.domain.models import AlertEvent
-from remediation.application.service import RemediationService
+from src.application.service import RemediationService
+from src.domain.models import AlertEvent
+from src.kafka.publisher import json_bytes
 
 
 logger = logging.getLogger(__name__)

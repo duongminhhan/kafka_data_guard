@@ -3,12 +3,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from remediation.connect.client import ConnectClient
-from remediation.support.escalation import EscalationClient
-from remediation.kafka.publisher import KafkaPublisher
-from remediation.domain.models import AlertEvent
-from remediation.application.reconciler import Reconciler
-
+from src.application.reconciler import Reconciler
+from src.connect.client import ConnectClient
+from src.domain.models import AlertEvent
+from src.kafka.publisher import KafkaPublisher
+from src.support.escalation import EscalationClient
 
 logger = logging.getLogger(__name__)
 

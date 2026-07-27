@@ -8,9 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from confluent_kafka import Producer
-
-from remediation.domain.models import RepairRecord
-
+from src.domain.models import RepairRecord
 
 TRANSACTION_TIMEOUT_MS = 60_000
 TRANSACTION_API_TIMEOUT_SECONDS = 30

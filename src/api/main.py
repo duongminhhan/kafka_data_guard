@@ -4,17 +4,16 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-
-from remediation.support.config import Settings
-from remediation.connect.client import ConnectClient
-from remediation.support.escalation import EscalationClient
-from remediation.kafka.publisher import KafkaPublisher
-from remediation.api.alert_parser import parse_alertmanager_payload
-from remediation.support.logging_utils import configure_logging
-from remediation.oracle.client import OracleClient
-from remediation.application.reconciler import Reconciler
-from remediation.kafka.request_queue import RequestConsumer, RequestPublisher, REQUEST_TOPIC
-from remediation.application.service import RemediationService
+from src.api.alert_parser import parse_alertmanager_payload
+from src.application.reconciler import Reconciler
+from src.application.service import RemediationService
+from src.connect.client import ConnectClient
+from src.kafka.publisher import KafkaPublisher
+from src.kafka.request_queue import RequestConsumer, RequestPublisher, REQUEST_TOPIC
+from src.oracle.client import OracleClient
+from src.support.config import Settings
+from src.support.escalation import EscalationClient
+from src.support.logging_utils import configure_logging
 
 
 @asynccontextmanager

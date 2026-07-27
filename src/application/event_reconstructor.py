@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from remediation.domain.models import MinedChange, ReplayEvent, TableMetadata, TableRef
+from src.domain.models import MinedChange, ReplayEvent, TableMetadata, TableRef
 
 
 class IncompleteRedoError(RuntimeError):

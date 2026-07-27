@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import timezone
 from typing import Any, Callable
 
+from remediation.application.event_reconstructor import reconstruct_events
 from remediation.connect.client import ConnectorRuntimeConfig
 from remediation.domain.models import (
     AlertEvent,
@@ -18,7 +19,6 @@ from remediation.domain.models import (
     TransactionTable,
 )
 from remediation.oracle.client import OracleClient
-from remediation.application.event_reconstructor import reconstruct_events
 
 
 class FlashbackDataMissingError(RuntimeError):
