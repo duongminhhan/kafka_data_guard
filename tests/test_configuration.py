@@ -120,7 +120,6 @@ def test_oracle_registry_isolates_clients_by_config_id(monkeypatch) -> None:
 
     monkeypatch.setattr(registry_module, "OracleClient", FakeOracleClient)
     registry = registry_module.OracleClientRegistry(
-        localhost_alias="oracle-host",
         pool_min=1,
         pool_max=1,
     )
@@ -137,6 +136,6 @@ def test_oracle_registry_isolates_clients_by_config_id(monkeypatch) -> None:
 
     assert client_a is not client_b
     assert created == [
-        ("user_a", "pwd", "oracle-host:1521/ORCLCDB", 1, 1),
+        ("user_a", "pwd", "localhost:1521/ORCLCDB", 1, 1),
         ("user_b", "pwd", "server-b:1521/UATB", 1, 1),
     ]

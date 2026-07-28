@@ -187,16 +187,10 @@ def main() -> int:
             binding.table: binding.full_topic for binding in topic_bindings
         }
         credential = guard_config.credential
-        oracle_host = credential.host
-        if (
-            oracle_host.lower() in {"localhost", "127.0.0.1"}
-            and settings.oracle_localhost_alias
-        ):
-            oracle_host = settings.oracle_localhost_alias
         oracle = OracleClient(
             credential.username,
             credential.password,
-            f"{oracle_host}:{credential.port}/{credential.database}",
+            credential.dsn,
             settings.oracle_pool_min,
             settings.oracle_pool_max,
             query_observer=printer.query,

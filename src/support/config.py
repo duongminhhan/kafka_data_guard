@@ -36,7 +36,6 @@ class Settings:
     config_db_login_timeout_seconds: int
     config_db_query_timeout_seconds: int
     config_cache_ttl_seconds: float
-    oracle_localhost_alias: str | None
     oracle_pool_min: int
     oracle_pool_max: int
     escalation_webhook_url: str | None
@@ -95,9 +94,6 @@ class Settings:
             ),
             config_cache_ttl_seconds=float(
                 _required("CONFIG_CACHE_TTL_SECONDS")
-            ),
-            oracle_localhost_alias=(
-                os.getenv("ORACLE_LOCALHOST_ALIAS", "").strip() or None
             ),
             oracle_pool_min=int(_required("ORACLE_POOL_MIN")),
             oracle_pool_max=int(_required("ORACLE_POOL_MAX")),

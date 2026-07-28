@@ -1,27 +1,4 @@
-IF DB_ID(N'ingest_reference') IS NULL
-BEGIN
-    CREATE DATABASE [ingest_reference];
-END;
-GO
-
 USE [ingest_reference];
-GO
-
--- UAT đã có bảng này. Khối dưới chỉ giúp môi trường POC mới khởi tạo được.
-IF OBJECT_ID(N'[dbo].[ETLConfiguration]', N'U') IS NULL
-BEGIN
-    CREATE TABLE [dbo].[ETLConfiguration]
-    (
-        [ETLConfigurationID] INT IDENTITY(1,1) NOT NULL,
-        [ConfigurationFilter] VARCHAR(255) NOT NULL,
-        [QueueName] VARCHAR(50) NULL,
-        [ConfiguredDriver] VARCHAR(100) NULL,
-        [ConfiguredValue] VARCHAR(750) NULL,
-        [Description] NVARCHAR(255) NULL,
-        CONSTRAINT [PK_ETLConfiguration]
-            PRIMARY KEY ([ETLConfigurationID])
-    );
-END;
 GO
 
 IF OBJECT_ID(N'[dbo].[KafkaGuardTopic]', N'U') IS NULL
@@ -47,33 +24,5 @@ BEGIN
             FOREIGN KEY ([ConfigID])
             REFERENCES [dbo].[ETLConfiguration] ([ETLConfigurationID])
     );
-END;
-GO
-
--- Migration từ contract JSON array cũ sang chuỗi CSV.
-IF EXISTS
-(
-    SELECT 1
-    FROM sys.check_constraints
-    WHERE [name] = N'CK_KafkaGuardTopic_ListCDCTopic_IsJson'
-      AND [parent_object_id] = OBJECT_ID(N'[dbo].[KafkaGuardTopic]')
-)
-BEGIN
-    ALTER TABLE [dbo].[KafkaGuardTopic]
-        DROP CONSTRAINT [CK_KafkaGuardTopic_ListCDCTopic_IsJson];
-END;
-GO
-
-IF NOT EXISTS
-(
-    SELECT 1
-    FROM sys.check_constraints
-    WHERE [name] = N'CK_KafkaGuardTopic_ListCDCTopic_NotEmpty'
-      AND [parent_object_id] = OBJECT_ID(N'[dbo].[KafkaGuardTopic]')
-)
-BEGIN
-    ALTER TABLE [dbo].[KafkaGuardTopic]
-        ADD CONSTRAINT [CK_KafkaGuardTopic_ListCDCTopic_NotEmpty]
-        CHECK (NULLIF(LTRIM(RTRIM([ListCDCTopic])), '') IS NOT NULL);
 END;
 GO

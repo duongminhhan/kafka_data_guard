@@ -37,7 +37,6 @@ async def lifespan(app: FastAPI):
         settings.config_cache_ttl_seconds,
     )
     oracle_registry = OracleClientRegistry(
-        settings.oracle_localhost_alias,
         settings.oracle_pool_min,
         settings.oracle_pool_max,
     )
