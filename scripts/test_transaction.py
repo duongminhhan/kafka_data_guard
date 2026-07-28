@@ -18,12 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remediation.application.event_reconstructor import reconstruct_events
-from remediation.application.reconciler import Reconciler
-from remediation.connect.client import ConnectClient
-from remediation.domain.models import AlertEvent
-from remediation.oracle.client import OracleClient
-from remediation.support.config import Settings
+from src.application.event_reconstructor import reconstruct_events
+from src.application.reconciler import Reconciler
+from src.configuration.parsers import resolve_topic_bindings
+from src.configuration.repository import SqlServerConfigRepository
+from src.connect.client import ConnectClient
+from src.domain.models import AlertEvent
+from src.oracle.client import OracleClient
+from src.support.config import Settings
 
 
 XID_PATTERN = re.compile(r"^[0-9A-Fa-f]{16}$")
@@ -163,10 +165,32 @@ def main() -> int:
     try:
         connector = _resolve_connector(connect, args.connector)
         config = connect.get_runtime_config(connector)
+        guard_config = SqlServerConfigRepository(
+            settings.config_db_host,
+            settings.config_db_port,
+            settings.config_db_name,
+            settings.config_db_user,
+            settings.config_db_password,
+        ).get_by_connector(connector)
+        topic_bindings = resolve_topic_bindings(
+            guard_config.topics,
+            config,
+            guard_config.credential.username,
+        )
+        topic_by_table = {
+            binding.table: binding.full_topic for binding in topic_bindings
+        }
+        credential = guard_config.credential
+        oracle_host = credential.host
+        if (
+            oracle_host.lower() in {"localhost", "127.0.0.1"}
+            and settings.oracle_localhost_alias
+        ):
+            oracle_host = settings.oracle_localhost_alias
         oracle = OracleClient(
-            settings.oracle_user,
-            settings.oracle_password,
-            settings.oracle_dsn,
+            credential.username,
+            credential.password,
+            f"{oracle_host}:{credential.port}/{credential.database}",
             1,
             1,
             query_observer=printer.query,
@@ -191,7 +215,9 @@ def main() -> int:
         )
 
         # BƯỚC 1: transaction scope, metadata và khoảng SCN.
-        included, by_table = reconciler._find_transaction_scope(event, config)
+        included, by_table = reconciler._find_transaction_scope(
+            event, config, topic_by_table
+        )
         if not by_table:
             printer.output(1, "Không có table thuộc connector", [], "")
             return 0
@@ -211,7 +237,7 @@ def main() -> int:
                 "start_scn": start_scn,
                 "commit_scn": commit_scn,
             },
-            "remediation/application/reconciler.py::_find_transaction_scope",
+            "src/application/reconciler.py::_find_transaction_scope",
         )
         if _stop_after(args.step, 1):
             return 0
@@ -230,7 +256,7 @@ def main() -> int:
             2,
             "Mined changes",
             mined,
-            "remediation/oracle/client.py::mine_transaction",
+            "src/oracle/client.py::mine_transaction",
         )
         if _stop_after(args.step, 2):
             return 0
@@ -246,7 +272,7 @@ def main() -> int:
             3,
             "Source rows AS OF START_SCN",
             seed_rows,
-            "remediation/application/reconciler.py::_load_seed_rows",
+            "src/application/reconciler.py::_load_seed_rows",
         )
         if _stop_after(args.step, 3):
             return 0
@@ -261,7 +287,7 @@ def main() -> int:
             4,
             "Reconstructed I/U/D events",
             replay_events,
-            "remediation/application/event_reconstructor.py::reconstruct_events",
+            "src/application/event_reconstructor.py::reconstruct_events",
         )
         if _stop_after(args.step, 4):
             return 0
@@ -280,7 +306,7 @@ def main() -> int:
             5,
             "Current source rows",
             current_rows,
-            "remediation/application/reconciler.py::_load_current_rows",
+            "src/application/reconciler.py::_load_current_rows",
         )
         if _stop_after(args.step, 5):
             return 0
@@ -295,7 +321,7 @@ def main() -> int:
             6,
             "Repair decisions",
             {"decisions": decisions, "details": decision_trace},
-            "remediation/application/reconciler.py::_choose_repairs",
+            "src/application/reconciler.py::_choose_repairs",
         )
         if _stop_after(args.step, 6):
             return 0
@@ -310,12 +336,13 @@ def main() -> int:
             start_time_ms,
             commit_time_ms,
             len(by_table),
+            topic_by_table,
         )
         printer.output(
             7,
             "Final Kafka messages",
             {"records": records, "stats": stats},
-            "remediation/application/reconciler.py::_build_kafka_records",
+            "src/application/reconciler.py::_build_kafka_records",
         )
         return 0
     finally:

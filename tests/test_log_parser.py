@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from remediation.api.alert_parser import (
+from src.api.alert_parser import (
     extract_event_count,
     extract_xid,
     normalize_xid,

@@ -3,8 +3,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping
 
-from remediation.domain.models import TableMetadata, TableRef
-from remediation.oracle.client import OracleClient
+from src.domain.models import TableMetadata, TableRef
+from src.oracle.client import OracleClient
 from scripts.test_transaction import StepPrinter
 
 

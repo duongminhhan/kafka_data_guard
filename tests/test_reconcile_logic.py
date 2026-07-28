@@ -4,10 +4,10 @@ import pytest
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from remediation.connect.client import ConnectorRuntimeConfig
-from remediation.domain.models import AlertEvent, MinedChange, TableMetadata, TableRef, TransactionTable
-from remediation.application.event_reconstructor import IncompleteRedoError, reconstruct_events
-from remediation.application.reconciler import IncompleteTransactionError, Reconciler, adjust_topic_component
+from src.connect.client import ConnectorRuntimeConfig
+from src.domain.models import AlertEvent, MinedChange, TableMetadata, TableRef, TransactionTable
+from src.application.event_reconstructor import IncompleteRedoError, reconstruct_events
+from src.application.reconciler import IncompleteTransactionError, Reconciler, adjust_topic_component
 
 
 TABLE = TableRef("C##CDCUSER", "CDC_REMEDIATION_POC")
@@ -357,6 +357,99 @@ def test_update_only_history_keeps_debezium_update_operation() -> None:
     assert records[0].value["before"] == {"ID": "1", "PAYLOAD": "old"}
     assert records[0].value["after"] == current
     assert stats == {"create": 0, "update": 1, "delete": 0, "tables": 1}
+
+
+def test_update_then_delete_emits_only_update_when_key_still_exists() -> None:
+    replays = reconstruct_events(
+        [
+            change(
+                "UPDATE",
+                1,
+                "RID1",
+                before={"ID": "1", "PAYLOAD": "old"},
+                after={"ID": "1", "PAYLOAD": "updated"},
+            ),
+            change(
+                "DELETE",
+                2,
+                "RID1",
+                before={"ID": "1", "PAYLOAD": "updated"},
+            ),
+        ],
+        {TABLE: METADATA},
+        lambda _metadata, _key: {"ID": "1", "PAYLOAD": "old"},
+    )
+    current = {"ID": "1", "PAYLOAD": "business-recreated"}
+
+    decisions, trace = Reconciler._choose_repairs(
+        {(TABLE, ("1",)): replays},
+        {TABLE: {("1",): current}},
+        {TABLE: METADATA},
+    )
+
+    assert [(replay.operation, op) for replay, op in decisions] == [
+        ("UPDATE", "u")
+    ]
+    assert decisions[0][0].after == current
+    assert trace[0]["operations"] == ["UPDATE", "DELETE"]
+    assert trace[0]["output_op"] == "u"
+
+
+def test_update_then_delete_emits_both_in_order_when_key_is_absent() -> None:
+    replays = reconstruct_events(
+        [
+            change(
+                "UPDATE",
+                1,
+                "RID1",
+                before={"ID": "1", "PAYLOAD": "old"},
+                after={"ID": "1", "PAYLOAD": "updated"},
+            ),
+            change(
+                "DELETE",
+                2,
+                "RID1",
+                before={"ID": "1", "PAYLOAD": "updated"},
+            ),
+        ],
+        {TABLE: METADATA},
+        lambda _metadata, _key: {"ID": "1", "PAYLOAD": "old"},
+    )
+
+    decisions, trace = Reconciler._choose_repairs(
+        {(TABLE, ("1",)): replays},
+        {TABLE: {}},
+        {TABLE: METADATA},
+    )
+    records, stats = Reconciler._build_kafka_records(
+        decisions,
+        AlertEvent(
+            "oracle",
+            "01001000E6030000",
+            datetime.now(timezone.utc),
+            "log",
+        ),
+        ConnectorRuntimeConfig(
+            "server",
+            (),
+            (),
+            connector_version="3.5.2.Final",
+        ),
+        {TABLE: METADATA},
+        100,
+        None,
+        None,
+        1,
+    )
+
+    assert [(replay.order, op) for replay, op in decisions] == [(1, "u"), (2, "d")]
+    assert [record.value["op"] for record in records] == ["u", "d"]
+    assert records[0].value["before"] == {"ID": "1", "PAYLOAD": "old"}
+    assert records[0].value["after"] == {"ID": "1", "PAYLOAD": "updated"}
+    assert records[1].value["before"] == {"ID": "1", "PAYLOAD": "updated"}
+    assert records[1].value["after"] is None
+    assert trace[0]["output_ops"] == ["u", "d"]
+    assert stats == {"create": 0, "update": 1, "delete": 1, "tables": 1}
 
 
 def test_reconciler_builds_schema_enabled_composite_primary_key() -> None:

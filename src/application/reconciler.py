@@ -5,11 +5,11 @@ import time
 from collections import defaultdict
 from dataclasses import replace
 from datetime import timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from remediation.application.event_reconstructor import reconstruct_events
-from remediation.connect.client import ConnectorRuntimeConfig
-from remediation.domain.models import (
+from src.application.event_reconstructor import reconstruct_events
+from src.connect.client import ConnectorRuntimeConfig
+from src.domain.models import (
     AlertEvent,
     MinedChange,
     RepairRecord,
@@ -18,7 +18,7 @@ from remediation.domain.models import (
     TableRef,
     TransactionTable,
 )
-from remediation.oracle.client import OracleClient
+from src.oracle.client import OracleClient
 
 
 class FlashbackDataMissingError(RuntimeError):
@@ -221,11 +221,14 @@ class Reconciler:
         self,
         event: AlertEvent,
         connector_config: ConnectorRuntimeConfig,
+        topic_by_table: Mapping[TableRef, str] | None = None,
     ) -> tuple[list[RepairRecord], dict[str, int]]:
         """Luồng chính"""
 
         # BƯỚC 1: Tìm table, SCN và metadata của transaction.
-        included, by_table = self._find_transaction_scope(event, connector_config)
+        included, by_table = self._find_transaction_scope(
+            event, connector_config, topic_by_table
+        )
         if not by_table:
             return [], {"create": 0, "update": 0, "delete": 0, "tables": 0}
 
@@ -293,6 +296,7 @@ class Reconciler:
             start_time_ms,
             commit_time_ms,
             len(by_table),
+            topic_by_table,
         )
         self._trace("repair_records", records)
         self._trace("stats", stats)
@@ -302,6 +306,7 @@ class Reconciler:
         self,
         event: AlertEvent,
         connector_config: ConnectorRuntimeConfig,
+        topic_by_table: Mapping[TableRef, str] | None = None,
     ) -> tuple[list[TransactionTable], dict[TableRef, list[TransactionTable]]]:
         """Bước 1: lọc các table thuộc phạm vi connector."""
         summaries = self._oracle.find_transaction_tables(
@@ -323,6 +328,7 @@ class Reconciler:
             summary
             for summary in summaries
             if connector_config.includes(summary.table)
+            and (topic_by_table is None or summary.table in topic_by_table)
         ]
         by_table: dict[TableRef, list[TransactionTable]] = defaultdict(list)
         for summary in included:
@@ -415,7 +421,7 @@ class Reconciler:
         replay_events: list[ReplayEvent],
         metadata_by_table: dict[TableRef, TableMetadata],
     ) -> GroupedEvents:
-        """Bước 5: mỗi table + PK chỉ tạo tối đa một repair message."""
+        """Bước 5: gom history để quyết định một hoặc nhiều repair theo PK."""
         # 1. Kết quả có dạng:
         #    (table, composite_primary_key) -> các event của cùng một record.
         grouped: GroupedEvents = {}
@@ -435,7 +441,7 @@ class Reconciler:
             #    được toàn bộ lịch sử và quyết định emit c, emit d hoặc bypass.
             grouped.setdefault(identity, []).append(replay)
 
-        # 5. Mỗi group đại diện cho một record và chỉ sinh tối đa một repair.
+        # 5. Mỗi group đại diện cho toàn bộ history của một record.
         return grouped
 
     def _load_current_rows(
@@ -562,8 +568,16 @@ class Reconciler:
                     continue
 
                 # 6b. Source không còn row và history có DELETE:
-                #     lấy DELETE cuối cùng làm đại diện và phát op=d.
-                decisions.append((deletes[-1], "d"))
+                #     phát lại toàn bộ I/U/D theo đúng thứ tự transaction.
+                #     Ví dụ U -> D phải phát cả u rồi d; nếu chỉ phát d thì
+                #     downstream sẽ mất event UPDATE thực sự đã xảy ra.
+                output_ops = {
+                    "INSERT": "c",
+                    "UPDATE": "u",
+                    "DELETE": "d",
+                }
+                for replay in replays:
+                    decisions.append((replay, output_ops[replay.operation]))
                 decision_trace.append(
                     {
                         "table": table.qualified_name,
@@ -571,12 +585,20 @@ class Reconciler:
                         "source_row": None,
                         "operations": [item.operation for item in replays],
                         "decision": "EMIT",
-                        "output_op": "d",
-                        "reason": "deleted key is absent from current source",
+                        "output_ops": [
+                            output_ops[item.operation] for item in replays
+                        ],
+                        "reason": (
+                            "deleted key is absent; replay full operation history"
+                        ),
                     }
                 )
 
-        # 7. Trả quyết định cho bước dựng Kafka record và trace để debug.
+        # 7. Group theo PK có thể làm các key bị gom lại. Sort lần cuối theo
+        #    txSeq để Kafka records vẫn đúng thứ tự DML toàn transaction.
+        decisions.sort(key=lambda item: item[0].order)
+
+        # 8. Trả quyết định cho bước dựng Kafka record và trace để debug.
         return decisions, decision_trace
 
     @staticmethod
@@ -589,6 +611,7 @@ class Reconciler:
         start_time_ms: int | None,
         commit_time_ms: int | None,
         table_count: int,
+        topic_by_table: Mapping[TableRef, str] | None = None,
     ) -> tuple[list[RepairRecord], dict[str, int]]:
         """Bước 7: chuyển quyết định thành key/value/header kiểu Debezium."""
         # 1. Khởi tạo bộ đếm kết quả và danh sách message sẽ gửi lên Kafka.
@@ -608,11 +631,15 @@ class Reconciler:
             stats[{"c": "create", "u": "update", "d": "delete"}[op]] += 1
 
             # 3. Dựng topic đích theo format: <topic.prefix>.<schema>.<table>.
-            topic = ".".join(
-                (
-                    connector_config.topic_prefix,
-                    adjust_topic_component(replay.table.owner),
-                    adjust_topic_component(replay.table.name),
+            topic = (
+                topic_by_table[replay.table]
+                if topic_by_table is not None
+                else ".".join(
+                    (
+                        connector_config.topic_prefix,
+                        adjust_topic_component(replay.table.owner),
+                        adjust_topic_component(replay.table.name),
+                    )
                 )
             )
 

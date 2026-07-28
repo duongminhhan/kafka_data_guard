@@ -5,12 +5,12 @@ from typing import Any, Iterator, Mapping
 
 import pytest
 
-from remediation.oracle.logminer_parser import (
+from src.oracle.logminer_parser import (
     LogMinerSqlParseError,
     parse_logminer_change,
 )
-from remediation.domain.models import TableMetadata, TableRef
-from remediation.oracle.client import OracleClient
+from src.domain.models import TableMetadata, TableRef
+from src.oracle.client import OracleClient
 
 
 TABLE = TableRef("C##CDCUSER", "CDC_REMEDIATION_POC")

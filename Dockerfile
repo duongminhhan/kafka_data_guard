@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
-COPY remediation ./remediation
+COPY src ./src
 COPY scripts/test_transaction.py ./scripts/test_transaction.py
 
 RUN useradd --create-home --uid 10001 remediation \
@@ -18,4 +18,4 @@ USER remediation
 
 EXPOSE 8090
 
-CMD ["python", "-m", "uvicorn", "remediation.api.main:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8090"]

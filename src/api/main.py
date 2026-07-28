@@ -5,12 +5,12 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from src.api.alert_parser import parse_alertmanager_payload
-from src.application.reconciler import Reconciler
 from src.application.service import RemediationService
+from src.configuration.repository import GuardConfigCache, SqlServerConfigRepository
 from src.connect.client import ConnectClient
 from src.kafka.publisher import KafkaPublisher
 from src.kafka.request_queue import RequestConsumer, RequestPublisher, REQUEST_TOPIC
-from src.oracle.client import OracleClient
+from src.oracle.registry import OracleClientRegistry
 from src.support.config import Settings
 from src.support.escalation import EscalationClient
 from src.support.logging_utils import configure_logging
@@ -21,18 +21,24 @@ async def lifespan(app: FastAPI):
     # Khởi tạo một pipeline dùng chung cho cả webhook và Kafka request consumer.
     settings = Settings.from_env()
     configure_logging("INFO")
-    oracle = OracleClient(
-        settings.oracle_user,
-        settings.oracle_password,
-        settings.oracle_dsn,
-        1,
-        4,
+    config_repository = SqlServerConfigRepository(
+        settings.config_db_host,
+        settings.config_db_port,
+        settings.config_db_name,
+        settings.config_db_user,
+        settings.config_db_password,
     )
+    config_cache = GuardConfigCache(
+        config_repository,
+        settings.config_cache_ttl_seconds,
+    )
+    oracle_registry = OracleClientRegistry(settings.oracle_localhost_alias)
     connect = ConnectClient(settings.connect_url)
     publisher = KafkaPublisher(settings.kafka_bootstrap_servers)
     app.state.service = RemediationService(
         connect,
-        Reconciler(oracle),
+        config_cache,
+        oracle_registry,
         publisher,
         EscalationClient(settings.escalation_webhook_url),
     )
@@ -47,7 +53,7 @@ async def lifespan(app: FastAPI):
     app.state.request_publisher.close()
     publisher.close()
     connect.close()
-    oracle.close()
+    oracle_registry.close()
 
 
 app = FastAPI(

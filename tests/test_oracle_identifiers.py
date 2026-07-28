@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from remediation.oracle.client import OracleClient
-from remediation.oracle.sql_utils import quote_identifier, quote_qualified_name
+from src.oracle.client import OracleClient
+from src.oracle.sql_utils import quote_identifier, quote_qualified_name
 
 
 def test_safe_oracle_identifiers_are_quoted() -> None:

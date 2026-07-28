@@ -15,7 +15,7 @@ App là pipeline **Oracle read-only → Kafka publish-only**:
 
 ## 1. Tiếp nhận request
 
-Webhook parse đầy đủ dòng log và publish request vào `cdc-remediation-requests`:
+Webhook parse đầy đủ dòng log và publish request vào `KDG_REQUEST`:
 
 ```json
 {
@@ -103,7 +103,8 @@ Archived log được ưu tiên hơn online redo cùng sequence. File đầu đ�
 
 Khi connector có `database.pdb.name`, service giữ LogMiner connection ở `CDB$ROOT`, tự
 prefix tên cột mining bằng PDB và chỉ switch container khi đọc metadata/Flashback source.
-`ORACLE_DSN` vì vậy phải trỏ tới CDB root, không trỏ trực tiếp PDB.
+Database/service lấy từ credential theo `ConfigID` vì vậy phải trỏ tới CDB root, không
+trỏ trực tiếp PDB.
 
 Nếu không còn đủ redo hoặc Oracle trả `ORA-01291`, transaction thất bại và escalation;
 không publish một phần.
@@ -168,17 +169,21 @@ source và chỉ đánh giá trạng thái mỗi key một lần:
   toàn bộ row hiện tại.
 - Source có row và lịch sử XID chỉ có `UPDATE`: phát một `u`, `before` lấy từ UPDATE
   cuối đã reconstruct, `after` là toàn bộ row hiện tại.
-- Source không có row và lịch sử XID có `DELETE`: phát một `d`, `before` lấy từ trạng
-  thái trước delete, `after=null`.
+- Source có row và lịch sử XID là `UPDATE -> DELETE`: phát `u` với `after` là row hiện
+  tại, bypass `d` để không xóa record đang tồn tại.
+- Source không có row và lịch sử XID có `DELETE`: phát lại toàn bộ chuỗi `INSERT`,
+  `UPDATE`, `DELETE` đã reconstruct theo `txSeq`. Ví dụ `UPDATE -> DELETE` phải phát
+  lần lượt `u -> d`.
 - Source có row và lịch sử XID chỉ có `DELETE`: bypass; key đã được nghiệp vụ tạo lại,
   phát delete cũ sẽ làm mất dữ liệu downstream.
 - Source không có row và lịch sử XID chỉ có `INSERT/UPDATE`: bypass vì không còn row
   nguồn để dựng.
-- Mỗi key phát tối đa một repair message.
+- Một key có thể phát nhiều repair message khi source không còn row và history kết thúc
+  bằng `DELETE`.
 
 `AS OF SCN :start_scn` vẫn được dùng nội bộ khi cần dựng `before` an toàn cho delete;
 các key cùng bảng cũng được đọc theo batch. SELECT current state mới là bước quyết định
-có phát `c`, `d` hay bypass.
+có phát `c`, `u`, `d`, phát cả chuỗi history hay bypass.
 
 Primary-key update hiện fail-closed vì Debezium có key-change semantics riêng; service
 không tự phát message có thể sai. Bảng không có PK, ROW_ID thiếu, type Oracle chưa hỗ trợ,
@@ -197,10 +202,13 @@ Sai số lượng dù chỉ một event sẽ dừng toàn bộ XID. Mapping outp
 
 | Oracle | Debezium `op` | `before` | `after` |
 | --- | --- | --- | --- |
-| Source có row, XID có I/U | `c` | `null` | row hiện tại từ source |
+| Source có row, XID có I | `c` | `null` | row hiện tại từ source |
+| Source có row, XID chỉ có U | `u` | row trước update | row hiện tại từ source |
+| Source có row, XID có U -> D | `u` | row trước update | row hiện tại từ source |
+| Source empty, XID có U -> D | `u`, sau đó `d` | ảnh row theo từng event | ảnh row theo từng event |
 | Source empty, XID có D | `d` | row trước delete | `null` |
 
-Message được publish theo thứ tự key xuất hiện đầu tiên vào topic
+Message được publish theo đúng thứ tự DML `txSeq` của transaction vào topic
 `{topic.prefix}.{schema đã adjust}.{table}` trong một Kafka transaction. Nếu connector
 bật `provide.transaction.metadata`, service thêm `total_order` và
 `data_collection_order`; nếu không, trường `transaction` giữ `null` giống connector.

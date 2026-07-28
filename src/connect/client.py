@@ -30,6 +30,7 @@ class ConnectorRuntimeConfig:
     run_id: str | None = None
     key_schemas_enabled: bool = False
     decimal_handling_mode: str = "string"
+    included_tables: tuple[TableRef, ...] = ()
 
     def includes(self, table: TableRef) -> bool:
         name = table.qualified_name
@@ -44,6 +45,19 @@ def _compile_list(value: str | None) -> tuple[re.Pattern[str], ...]:
     if not value:
         return ()
     return tuple(re.compile(item.strip()) for item in value.split(",") if item.strip())
+
+
+def _exact_tables(value: str | None) -> tuple[TableRef, ...]:
+    """Lấy các OWNER.TABLE literal; regex phức tạp vẫn do includes() xử lý."""
+    if not value:
+        return ()
+    tables: list[TableRef] = []
+    for item in value.split(","):
+        name = item.strip()
+        if re.fullmatch(r"[A-Za-z0-9_$#]+\.[A-Za-z0-9_$#]+", name):
+            owner, table = name.split(".", 1)
+            tables.append(TableRef(owner.upper(), table.upper()))
+    return tuple(tables)
 
 
 def _uuid7() -> str:
@@ -183,6 +197,7 @@ class ConnectClient:
             run_id=self._run_id,
             key_schemas_enabled=key_schemas_enabled == "true",
             decimal_handling_mode=decimal_mode,
+            included_tables=_exact_tables(include),
         )
 
     def close(self) -> None:

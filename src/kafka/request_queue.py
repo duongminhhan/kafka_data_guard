@@ -14,10 +14,11 @@ from src.kafka.publisher import json_bytes
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TOPIC = "cdc-remediation-requests"
+REQUEST_TOPIC = "KDG_REQUEST"
 CONSUMER_GROUP = "debezium-oracle-remediation-v1"
 PUBLISH_FLUSH_TIMEOUT_SECONDS = 30
 CLOSE_FLUSH_TIMEOUT_SECONDS = 10
+MAX_POLL_INTERVAL_MS = 3_600_000
 VIETNAM_TIMEZONE = timezone(timedelta(hours=7), name="Asia/Ho_Chi_Minh")
 
 
@@ -95,7 +96,8 @@ class RequestPublisher:
             for event in events:
                 self._producer.produce(
                     topic=REQUEST_TOPIC,
-                    key=f"{event.connector}:{event.xid}".encode(),
+                    # Cùng connector vào cùng partition để giữ thứ tự request.
+                    key=event.connector.encode(),
                     value=json_bytes(event_to_request(event)),
                     headers=[("source", "alertmanager")],
                     on_delivery=delivered,
@@ -146,16 +148,19 @@ class RequestConsumer:
                 "group.id": CONSUMER_GROUP,
                 "enable.auto.commit": False,
                 "auto.offset.reset": "earliest",
+                # Một transaction LogMiner có thể chạy lâu. Giữ consumer
+                # trong group cho tới khi transaction đó xử lý xong.
+                "max.poll.interval.ms": MAX_POLL_INTERVAL_MS,
             }
         )
         consumer.subscribe([REQUEST_TOPIC])
         logger.info(
-            "Remediation request consumer started",
+            "Sequential remediation request consumer started",
             extra={"topic": REQUEST_TOPIC, "consumer_group": CONSUMER_GROUP},
         )
         try:
             while not self._stop.is_set():
-                message = consumer.poll(1)
+                message = consumer.poll(0.5)
                 if message is None:
                     continue
                 if message.error():
@@ -173,15 +178,17 @@ class RequestConsumer:
                     consumer.commit(message=message, asynchronous=False)
                     continue
 
+                # Chỉ poll request kế tiếp sau khi transaction hiện tại đã
+                # xử lý thành công và commit offset.
                 try:
-                    # Bắt đầu xử lý Oracle cho đúng một transaction request.
-                    self._service.remediate(event)
+                    result = self._service.remediate(event)
                     consumer.commit(message=message, asynchronous=False)
                     logger.info(
                         "Remediation request committed",
                         extra={
                             "connector": event.connector,
                             "xid": event.xid,
+                            "config_id": result.get("config_id"),
                             "topic": message.topic(),
                             "offset": message.offset(),
                         },
@@ -193,7 +200,9 @@ class RequestConsumer:
                     )
                     consumer.seek(
                         TopicPartition(
-                            message.topic(), message.partition(), message.offset()
+                            message.topic(),
+                            message.partition(),
+                            message.offset(),
                         )
                     )
                     self._stop.wait(5)
