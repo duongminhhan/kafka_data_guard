@@ -23,6 +23,8 @@ class SqlServerConfigRepository:
         database: str,
         user: str,
         password: str,
+        login_timeout_seconds: int,
+        query_timeout_seconds: int,
         connect_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._connection_args = {
@@ -31,8 +33,8 @@ class SqlServerConfigRepository:
             "database": database,
             "user": user,
             "password": password,
-            "login_timeout": 10,
-            "timeout": 15,
+            "login_timeout": login_timeout_seconds,
+            "timeout": query_timeout_seconds,
         }
         self._connect_factory = connect_factory
 
@@ -81,7 +83,7 @@ class GuardConfigCache:
     def __init__(
         self,
         repository: SqlServerConfigRepository,
-        ttl_seconds: float = 300.0,
+        ttl_seconds: float,
     ) -> None:
         self._repository = repository
         self._ttl_seconds = ttl_seconds

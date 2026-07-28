@@ -10,11 +10,6 @@ from typing import Any
 from confluent_kafka import Producer
 from src.domain.models import RepairRecord
 
-TRANSACTION_TIMEOUT_MS = 60_000
-TRANSACTION_API_TIMEOUT_SECONDS = 30
-CLOSE_FLUSH_TIMEOUT_SECONDS = 10
-
-
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
@@ -38,18 +33,27 @@ def json_bytes(value: Any) -> bytes:
 
 
 class KafkaPublisher:
-    def __init__(self, bootstrap_servers: str) -> None:
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        transactional_id: str,
+        transaction_timeout_ms: int,
+        transaction_api_timeout_seconds: float,
+        close_flush_timeout_seconds: float,
+    ) -> None:
+        self._transaction_api_timeout_seconds = transaction_api_timeout_seconds
+        self._close_flush_timeout_seconds = close_flush_timeout_seconds
         self._producer = Producer(
             {
                 "bootstrap.servers": bootstrap_servers,
                 "enable.idempotence": True,
                 "acks": "all",
-                "transactional.id": "debezium-oracle-remediation-v1",
-                "transaction.timeout.ms": TRANSACTION_TIMEOUT_MS,
+                "transactional.id": transactional_id,
+                "transaction.timeout.ms": transaction_timeout_ms,
             }
         )
         self._lock = threading.Lock()
-        self._producer.init_transactions(TRANSACTION_API_TIMEOUT_SECONDS)
+        self._producer.init_transactions(self._transaction_api_timeout_seconds)
 
     def publish(self, records: list[RepairRecord]) -> None:
         if not records:
@@ -68,13 +72,13 @@ class KafkaPublisher:
                 # commit_transaction flushes outstanding messages and serves
                 # delivery failures before completing the transaction.
                 self._producer.commit_transaction(
-                    TRANSACTION_API_TIMEOUT_SECONDS
+                    self._transaction_api_timeout_seconds
                 )
             except Exception:
                 self._producer.abort_transaction(
-                    TRANSACTION_API_TIMEOUT_SECONDS
+                    self._transaction_api_timeout_seconds
                 )
                 raise
 
     def close(self) -> None:
-        self._producer.flush(CLOSE_FLUSH_TIMEOUT_SECONDS)
+        self._producer.flush(self._close_flush_timeout_seconds)

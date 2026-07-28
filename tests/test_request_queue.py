@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.domain.models import AlertEvent
 from src.kafka import request_queue as request_queue_module
@@ -23,7 +23,7 @@ def test_request_message_round_trip() -> None:
         run_id="019f6368-c503-7d1e-8d07-3ff4d6dafdd1",
     )
 
-    request = event_to_request(event)
+    request = event_to_request(event, timezone(timedelta(hours=7)))
     assert request["detected_at"] == "2026-07-21 09:17:03+07:00"
     assert request["log_line"] == event.log_line
     assert request["__debezium.context.runId"] == event.run_id
@@ -51,13 +51,15 @@ def test_consumer_finishes_and_commits_before_processing_next_request(
             self._offset = offset
 
         def value(self) -> bytes:
-            return json.dumps(event_to_request(self.event)).encode()
+            return json.dumps(
+                event_to_request(self.event, timezone.utc)
+            ).encode()
 
         def error(self):
             return None
 
         def topic(self) -> str:
-            return request_queue_module.REQUEST_TOPIC
+            return "KDG_REQUEST"
 
         def partition(self) -> int:
             return 0
@@ -91,7 +93,16 @@ def test_consumer_finishes_and_commits_before_processing_next_request(
             return {"config_id": 1}
 
     monkeypatch.setattr(request_queue_module, "Consumer", Consumer)
-    request_consumer = request_queue_module.RequestConsumer("kafka:9092", Service())
+    request_consumer = request_queue_module.RequestConsumer(
+        "kafka:9092",
+        Service(),
+        "KDG_REQUEST",
+        "APP_CDC_KDG",
+        3_600_000,
+        0.5,
+        5,
+        15,
+    )
     request_consumer._run()
 
     assert actions == [

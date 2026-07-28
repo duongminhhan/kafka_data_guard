@@ -160,7 +160,11 @@ def main() -> int:
     _load_dotenv(ROOT / ".env")
     settings = Settings.from_env()
     printer = StepPrinter(args.step)
-    connect = ConnectClient(settings.connect_url)
+    connect = ConnectClient(
+        settings.connect_url,
+        settings.connect_http_timeout_seconds,
+        settings.connect_config_cache_ttl_seconds,
+    )
     oracle: OracleClient | None = None
     try:
         connector = _resolve_connector(connect, args.connector)
@@ -171,6 +175,8 @@ def main() -> int:
             settings.config_db_name,
             settings.config_db_user,
             settings.config_db_password,
+            settings.config_db_login_timeout_seconds,
+            settings.config_db_query_timeout_seconds,
         ).get_by_connector(connector)
         topic_bindings = resolve_topic_bindings(
             guard_config.topics,
@@ -191,8 +197,8 @@ def main() -> int:
             credential.username,
             credential.password,
             f"{oracle_host}:{credential.port}/{credential.database}",
-            1,
-            1,
+            settings.oracle_pool_min,
+            settings.oracle_pool_max,
             query_observer=printer.query,
         )
         reconciler = Reconciler(oracle)

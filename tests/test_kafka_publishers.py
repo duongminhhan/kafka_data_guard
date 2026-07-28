@@ -40,7 +40,13 @@ def test_repair_publisher_relies_on_bounded_transaction_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(kafka_publisher, "Producer", FakeProducer)
-    publisher = kafka_publisher.KafkaPublisher("kafka:9092")
+    publisher = kafka_publisher.KafkaPublisher(
+        "kafka:9092",
+        "repair-producer",
+        60_000,
+        30,
+        10,
+    )
     record = RepairRecord(
         topic="cdc.table",
         key={"ID": 1},
@@ -62,7 +68,13 @@ def test_request_publisher_uses_bounded_flush(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(request_queue, "Producer", FakeProducer)
-    publisher = request_queue.RequestPublisher("kafka:9092")
+    publisher = request_queue.RequestPublisher(
+        "kafka:9092",
+        "KDG_REQUEST",
+        timezone.utc,
+        30,
+        10,
+    )
     event = AlertEvent(
         connector="oracle",
         xid="A1",
@@ -80,7 +92,13 @@ def test_request_publisher_reports_flush_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(request_queue, "Producer", FakeProducer)
-    publisher = request_queue.RequestPublisher("kafka:9092")
+    publisher = request_queue.RequestPublisher(
+        "kafka:9092",
+        "KDG_REQUEST",
+        timezone.utc,
+        30,
+        10,
+    )
     publisher._producer.flush_result = 1
     event = AlertEvent(
         connector="oracle",

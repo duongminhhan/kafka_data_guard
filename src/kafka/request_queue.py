@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, tzinfo
 from typing import Any
 
 from confluent_kafka import Consumer, KafkaError, Producer, TopicPartition
@@ -14,19 +14,14 @@ from src.kafka.publisher import json_bytes
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TOPIC = "KDG_REQUEST"
-CONSUMER_GROUP = "debezium-oracle-remediation-v1"
-PUBLISH_FLUSH_TIMEOUT_SECONDS = 30
-CLOSE_FLUSH_TIMEOUT_SECONDS = 10
-MAX_POLL_INTERVAL_MS = 3_600_000
-VIETNAM_TIMEZONE = timezone(timedelta(hours=7), name="Asia/Ho_Chi_Minh")
-
-
-def event_to_request(event: AlertEvent) -> dict[str, str]:
+def event_to_request(
+    event: AlertEvent,
+    request_timezone: tzinfo,
+) -> dict[str, str]:
     request = {
         "connector": event.connector,
         "transaction_id": event.xid,
-        "detected_at": event.detected_at.astimezone(VIETNAM_TIMEZONE).isoformat(
+        "detected_at": event.detected_at.astimezone(request_timezone).isoformat(
             sep=" "
         ),
         "log_line": event.log_line,
@@ -75,7 +70,18 @@ def request_to_event(payload: dict[str, Any]) -> AlertEvent:
 
 
 class RequestPublisher:
-    def __init__(self, bootstrap_servers: str) -> None:
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        request_topic: str,
+        request_timezone: tzinfo,
+        publish_flush_timeout_seconds: float,
+        close_flush_timeout_seconds: float,
+    ) -> None:
+        self._request_topic = request_topic
+        self._request_timezone = request_timezone
+        self._publish_flush_timeout_seconds = publish_flush_timeout_seconds
+        self._close_flush_timeout_seconds = close_flush_timeout_seconds
         self._producer = Producer(
             {
                 "bootstrap.servers": bootstrap_servers,
@@ -95,14 +101,16 @@ class RequestPublisher:
         with self._lock:
             for event in events:
                 self._producer.produce(
-                    topic=REQUEST_TOPIC,
+                    topic=self._request_topic,
                     # Cùng connector vào cùng partition để giữ thứ tự request.
                     key=event.connector.encode(),
-                    value=json_bytes(event_to_request(event)),
+                    value=json_bytes(event_to_request(event, self._request_timezone)),
                     headers=[("source", "alertmanager")],
                     on_delivery=delivered,
                 )
-            outstanding = self._producer.flush(PUBLISH_FLUSH_TIMEOUT_SECONDS)
+            outstanding = self._producer.flush(
+                self._publish_flush_timeout_seconds
+            )
             if outstanding:
                 raise TimeoutError(
                     f"Timed out publishing {outstanding} remediation request(s)"
@@ -111,7 +119,7 @@ class RequestPublisher:
             raise RuntimeError("; ".join(delivery_errors))
 
     def close(self) -> None:
-        outstanding = self._producer.flush(CLOSE_FLUSH_TIMEOUT_SECONDS)
+        outstanding = self._producer.flush(self._close_flush_timeout_seconds)
         if outstanding:
             logger.warning(
                 "Kafka request publisher closed with %s outstanding message(s)",
@@ -124,9 +132,21 @@ class RequestConsumer:
         self,
         bootstrap_servers: str,
         service: RemediationService,
+        request_topic: str,
+        consumer_group: str,
+        max_poll_interval_ms: int,
+        poll_timeout_seconds: float,
+        retry_delay_seconds: float,
+        stop_timeout_seconds: float,
     ) -> None:
         self._bootstrap_servers = bootstrap_servers
         self._service = service
+        self._request_topic = request_topic
+        self._consumer_group = consumer_group
+        self._max_poll_interval_ms = max_poll_interval_ms
+        self._poll_timeout_seconds = poll_timeout_seconds
+        self._retry_delay_seconds = retry_delay_seconds
+        self._stop_timeout_seconds = stop_timeout_seconds
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -139,28 +159,31 @@ class RequestConsumer:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=15)
+        self._thread.join(timeout=self._stop_timeout_seconds)
 
     def _run(self) -> None:
         consumer = Consumer(
             {
                 "bootstrap.servers": self._bootstrap_servers,
-                "group.id": CONSUMER_GROUP,
+                "group.id": self._consumer_group,
                 "enable.auto.commit": False,
                 "auto.offset.reset": "earliest",
                 # Một transaction LogMiner có thể chạy lâu. Giữ consumer
                 # trong group cho tới khi transaction đó xử lý xong.
-                "max.poll.interval.ms": MAX_POLL_INTERVAL_MS,
+                "max.poll.interval.ms": self._max_poll_interval_ms,
             }
         )
-        consumer.subscribe([REQUEST_TOPIC])
+        consumer.subscribe([self._request_topic])
         logger.info(
             "Sequential remediation request consumer started",
-            extra={"topic": REQUEST_TOPIC, "consumer_group": CONSUMER_GROUP},
+            extra={
+                "topic": self._request_topic,
+                "consumer_group": self._consumer_group,
+            },
         )
         try:
             while not self._stop.is_set():
-                message = consumer.poll(0.5)
+                message = consumer.poll(self._poll_timeout_seconds)
                 if message is None:
                     continue
                 if message.error():
@@ -205,6 +228,6 @@ class RequestConsumer:
                             message.offset(),
                         )
                     )
-                    self._stop.wait(5)
+                    self._stop.wait(self._retry_delay_seconds)
         finally:
             consumer.close()

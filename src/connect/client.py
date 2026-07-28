@@ -10,9 +10,6 @@ from dataclasses import dataclass
 import httpx
 from src.domain.models import TableRef
 
-_RUNTIME_CONFIG_CACHE_TTL_SECONDS = 60.0
-
-
 @dataclass(frozen=True)
 class ConnectorRuntimeConfig:
     """Snapshot contract của connector dùng để lọc table và dựng message tương thích."""
@@ -79,8 +76,14 @@ class ConnectClient:
     def __init__(
         self,
         base_url: str,
+        http_timeout_seconds: float,
+        cache_ttl_seconds: float,
     ) -> None:
-        self._client = httpx.Client(base_url=base_url, timeout=10)
+        self._client = httpx.Client(
+            base_url=base_url,
+            timeout=http_timeout_seconds,
+        )
+        self._cache_ttl_seconds = cache_ttl_seconds
         self._run_id = _uuid7()
         self._cache_lock = threading.Lock()
         self._connector_locks: dict[str, threading.Lock] = {}
@@ -108,7 +111,7 @@ class ConnectClient:
             runtime_config = self._fetch_runtime_config(connector)
             with self._cache_lock:
                 self._runtime_config_cache[connector] = (
-                    time.monotonic() + _RUNTIME_CONFIG_CACHE_TTL_SECONDS,
+                    time.monotonic() + self._cache_ttl_seconds,
                     runtime_config,
                 )
             return runtime_config

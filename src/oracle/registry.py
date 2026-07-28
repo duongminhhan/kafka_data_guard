@@ -11,9 +11,13 @@ class OracleClientRegistry:
 
     def __init__(
         self,
-        localhost_alias: str | None = None,
+        localhost_alias: str | None,
+        pool_min: int,
+        pool_max: int,
     ) -> None:
         self._localhost_alias = localhost_alias
+        self._pool_min = pool_min
+        self._pool_max = pool_max
         self._lock = threading.Lock()
         self._clients: dict[int, tuple[OracleCredential, OracleClient]] = {}
 
@@ -26,8 +30,8 @@ class OracleClientRegistry:
                     credential.username,
                     credential.password,
                     dsn,
-                    1,
-                    1,
+                    self._pool_min,
+                    self._pool_max,
                 )
                 self._clients[config_id] = (credential, client)
             elif cached[0] != credential:
@@ -36,8 +40,8 @@ class OracleClientRegistry:
                     credential.username,
                     credential.password,
                     self._dsn(credential),
-                    1,
-                    1,
+                    self._pool_min,
+                    self._pool_max,
                 )
                 self._clients[config_id] = (credential, client)
             return self._clients[config_id][1]

@@ -55,7 +55,11 @@ class _FakeHttpClient:
 
 
 def _client(fake_http_client: _FakeHttpClient) -> ConnectClient:
-    client = ConnectClient("http://connect:8083")
+    client = ConnectClient(
+        "http://connect:8083",
+        http_timeout_seconds=10,
+        cache_ttl_seconds=60,
+    )
     client._client.close()
     client._client = fake_http_client  # type: ignore[assignment]
     return client

@@ -121,6 +121,8 @@ def test_oracle_registry_isolates_clients_by_config_id(monkeypatch) -> None:
     monkeypatch.setattr(registry_module, "OracleClient", FakeOracleClient)
     registry = registry_module.OracleClientRegistry(
         localhost_alias="oracle-host",
+        pool_min=1,
+        pool_max=1,
     )
     first = parse_oracle_credential(
         "jdbc:oracle:thin:@//;localhost:1521;ORCLCDB;user_a;pwd;normal_type"
