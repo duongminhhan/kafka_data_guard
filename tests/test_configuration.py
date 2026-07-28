@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 
 from src.configuration.models import GuardConfig
@@ -10,7 +8,7 @@ from src.configuration.parsers import (
     parse_topic_list,
     resolve_topic_bindings,
 )
-from src.configuration.repository import GuardConfigCache
+from src.configuration.repository import GuardConfigCache, SqlServerConfigRepository
 from src.connect.client import ConnectorRuntimeConfig
 from src.domain.models import TableRef
 from src.oracle import registry as registry_module
@@ -81,16 +79,13 @@ def test_topic_binding_uses_real_owner_from_connector_metadata() -> None:
 
 
 def test_config_cache_does_not_reload_each_request() -> None:
-    now = datetime.now(timezone.utc)
     config = GuardConfig(
         connector_name="oracle-remediation-poc",
         config_id=1,
-        database_type="oracle",
         credential=parse_oracle_credential(
             "jdbc:oracle:thin:@//;localhost:1521;ORCLCDB;user;pwd;normal_type"
         ),
         topics=parse_topic_list("prefix.USER.TABLE_A"),
-        updated_at=now,
     )
 
     class Repository:
@@ -106,6 +101,63 @@ def test_config_cache_does_not_reload_each_request() -> None:
     assert cache.get("oracle-remediation-poc") is config
     assert cache.get("oracle-remediation-poc") is config
     assert repository.calls == 1
+
+
+def test_repository_reads_four_field_stored_procedure_contract() -> None:
+    row = {
+        "ConnectorName": "oracle-remediation-poc",
+        "ListCDCTopic": "oracle_remediation_poc.C__CDCUSER.PRODUCT",
+        "ConfigID": 7,
+        "DatabaseCredential": (
+            "jdbc:oracle:thin:@//;oracle-uat:1521;ORCL;"
+            "C##CDCUSER;secret;normal_type"
+        ),
+    }
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def callproc(self, name, args) -> None:
+            assert name == "dbo.spGetKafkaGuardTopicConfig"
+            assert args == ("oracle-remediation-poc",)
+
+        def __iter__(self):
+            return iter([row])
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    def connect_factory(**_kwargs) -> Connection:
+        return Connection()
+
+    repository = SqlServerConfigRepository(
+        "sql-uat",
+        1433,
+        "ingest_reference",
+        "app",
+        "secret",
+        10,
+        15,
+        connect_factory,
+    )
+
+    config = repository.get_by_connector("oracle-remediation-poc")
+
+    assert config.connector_name == "oracle-remediation-poc"
+    assert config.config_id == 7
+    assert config.credential.dsn == "oracle-uat:1521/ORCL"
+    assert config.topics[0].table_name == "PRODUCT"
 
 
 def test_oracle_registry_isolates_clients_by_config_id(monkeypatch) -> None:

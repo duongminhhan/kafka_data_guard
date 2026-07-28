@@ -1,28 +1,2 @@
-USE [ingest_reference];
-GO
+USE [ingest_reference];GO  IF OBJECT_ID(N'[dbo].[KafkaGuardTopic]', N'U') IS NULLBEGIN    CREATE TABLE [dbo].[KafkaGuardTopic]    (        [ID] UNIQUEIDENTIFIER NOT NULL            CONSTRAINT [DF_KafkaGuardTopic_ID] DEFAULT NEWID(),        [ConnectorName] VARCHAR(255) NOT NULL,        [ListCDCTopic] NVARCHAR(MAX) NOT NULL,        [ConfigID] INT NOT NULL,        [CreatedAt] DATETIME2(3) NOT NULL            CONSTRAINT [DF_KafkaGuardTopic_CreatedAt] DEFAULT SYSUTCDATETIME(),        [UpdatedAt] DATETIME2(3) NOT NULL            CONSTRAINT [DF_KafkaGuardTopic_UpdatedAt] DEFAULT SYSUTCDATETIME(),        CONSTRAINT [PK_KafkaGuardTopic]            PRIMARY KEY ([ID]),        CONSTRAINT [UQ_KafkaGuardTopic_ConnectorName]            UNIQUE ([ConnectorName]),        CONSTRAINT [CK_KafkaGuardTopic_ListCDCTopic_NotEmpty]            CHECK (NULLIF(LTRIM(RTRIM([ListCDCTopic])), '') IS NOT NULL),        CONSTRAINT [FK_KafkaGuardTopic_ETLConfiguration]            FOREIGN KEY ([ConfigID])            REFERENCES [dbo].[ETLConfiguration] ([ETLConfigurationID])    );END;GO
 
-IF OBJECT_ID(N'[dbo].[KafkaGuardTopic]', N'U') IS NULL
-BEGIN
-    CREATE TABLE [dbo].[KafkaGuardTopic]
-    (
-        [ID] UNIQUEIDENTIFIER NOT NULL
-            CONSTRAINT [DF_KafkaGuardTopic_ID] DEFAULT NEWID(),
-        [ConnectorName] VARCHAR(255) NOT NULL,
-        [ListCDCTopic] NVARCHAR(MAX) NOT NULL,
-        [ConfigID] INT NOT NULL,
-        [CreatedAt] DATETIME2(3) NOT NULL
-            CONSTRAINT [DF_KafkaGuardTopic_CreatedAt] DEFAULT SYSUTCDATETIME(),
-        [UpdatedAt] DATETIME2(3) NOT NULL
-            CONSTRAINT [DF_KafkaGuardTopic_UpdatedAt] DEFAULT SYSUTCDATETIME(),
-        CONSTRAINT [PK_KafkaGuardTopic]
-            PRIMARY KEY ([ID]),
-        CONSTRAINT [UQ_KafkaGuardTopic_ConnectorName]
-            UNIQUE ([ConnectorName]),
-        CONSTRAINT [CK_KafkaGuardTopic_ListCDCTopic_NotEmpty]
-            CHECK (NULLIF(LTRIM(RTRIM([ListCDCTopic])), '') IS NOT NULL),
-        CONSTRAINT [FK_KafkaGuardTopic_ETLConfiguration]
-            FOREIGN KEY ([ConfigID])
-            REFERENCES [dbo].[ETLConfiguration] ([ETLConfigurationID])
-    );
-END;
-GO

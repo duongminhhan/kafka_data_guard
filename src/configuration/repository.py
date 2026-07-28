@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
 from typing import Any, Callable
 
 from src.configuration.models import GuardConfig
@@ -62,21 +61,12 @@ class SqlServerConfigRepository:
                 f"Expected one Kafka Guard config for connector {connector_name!r}"
             )
         row = rows[0]
-        database_type = str(row["DatabaseType"]).strip().lower()
-        if database_type != "oracle":
-            raise ValueError(f"Unsupported source database type: {database_type}")
         return GuardConfig(
             connector_name=str(row["ConnectorName"]),
             config_id=int(row["ConfigID"]),
-            database_type=database_type,
             credential=parse_oracle_credential(str(row["DatabaseCredential"])),
             topics=parse_topic_list(row["ListCDCTopic"]),
-            updated_at=_datetime(row.get("UpdatedAt")),
         )
-
-
-def _datetime(value: Any) -> datetime | None:
-    return value if isinstance(value, datetime) else None
 
 
 class GuardConfigCache:

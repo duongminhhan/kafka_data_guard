@@ -15,6 +15,7 @@ BEGIN
     SELECT
         topic.[ConnectorName],
         topic.[ListCDCTopic],
+        topic.[ConfigID],
         config.[ConfiguredValue] AS [DatabaseCredential]
     FROM [dbo].[KafkaGuardTopic] AS topic
     INNER JOIN [dbo].[ETLConfiguration] AS config

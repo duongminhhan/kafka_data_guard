@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
 from src.domain.models import TableRef
 
@@ -48,7 +47,5 @@ class GuardConfig:
 
     connector_name: str
     config_id: int
-    database_type: str
     credential: OracleCredential
     topics: tuple[RawTopicBinding, ...]
-    updated_at: datetime | None
