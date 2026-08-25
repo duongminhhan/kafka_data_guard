@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: daily_order_metrics
+    columns:
+      - name: order_date
+        data_tests:
+          - not_null
+      - name: order_status
+        data_tests:
+          - not_null

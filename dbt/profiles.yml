@@ -1,0 +1,14 @@
+dbt:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: none
+      host: localhost
+      port: 8085
+      user: admin
+      password: ""
+      database: polaris
+      schema: silver
+      http_scheme: http
+      threads: 2

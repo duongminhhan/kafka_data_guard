@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: bronze
+    database: polaris
+    schema: bronze
+
+    tables:
+      - name: shopee_orders
+        columns:
+          - name: pkId
+            data_tests:
+              - not_null
+
+          - name: _batch_id
+            data_tests:
+              - not_null
+
+          - name: _ingested_at
+            data_tests:
+              - not_null

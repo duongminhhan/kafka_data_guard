@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SqlDialectMappings">
+    <file url="file://$PROJECT_DIR$/dbt/models/uat/my_first_dbt_model.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/dbt/models/uat/my_second_dbt_model.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/dbt/target/compiled/my_first_dbt_project/models/example/my_first_dbt_model.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/dbt/target/compiled/my_first_dbt_project/models/example/my_second_dbt_model.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/dbt/target/run/my_first_dbt_project/models/example/my_first_dbt_model.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/dbt/target/run/my_first_dbt_project/models/example/my_second_dbt_model.sql" dialect="GenericSQL" />
+  </component>
+</project>
